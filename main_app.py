@@ -183,11 +183,13 @@ class WellProductionApp(QMainWindow):
     
     def create_reservoir_buttons(self):
         """Create buttons for each unique reservoir"""
-        # Get unique reservoirs from wells
+        # Get unique reservoirs
         reservoirs = set()
-        for well in self.data_store.wells.values():
-            if well.reservoir and well.reservoir.strip():
-                reservoirs.add(well.reservoir)
+        
+        # Use the completion_to_reservoir mapping to get all unique reservoirs
+        for reservoir in self.data_store.completion_to_reservoir.values():
+            if reservoir and reservoir.strip():
+                reservoirs.add(reservoir)
         
         # Add 'All' button first
         all_button = QPushButton("Todos")
@@ -274,9 +276,12 @@ class WellProductionApp(QMainWindow):
                 self.map_widget.set_well_visibility(well_name, True)
             return
         
+        # Get wells that have completions in any of the selected reservoirs
+        visible_wells = self.data_store.get_wells_for_reservoirs(self.selected_reservoirs)
+        
         # Show wells from selected reservoirs, hide others
-        for well_name, well in self.data_store.wells.items():
-            if well.reservoir in self.selected_reservoirs:
+        for well_name in self.data_store.wells:
+            if well_name in visible_wells:
                 self.map_widget.set_well_visibility(well_name, True)
             else:
                 self.map_widget.set_well_visibility(well_name, False)
@@ -287,13 +292,10 @@ class WellProductionApp(QMainWindow):
         # Update status bar
         if len(self.selected_reservoirs) == 1:
             reservoir = next(iter(self.selected_reservoirs))
-            visible_wells = [well for well in self.data_store.wells.values() if well.reservoir == reservoir]
-            self.status_bar.showMessage(f"Showing {len(visible_wells)} wells in reservoir {reservoir}")
+            self.status_bar.showMessage(f"Showing wells in reservoir {reservoir}")
         else:
-            visible_wells = [well for well in self.data_store.wells.values() 
-                             if well.reservoir in self.selected_reservoirs]
             reservoirs_str = ", ".join(sorted(self.selected_reservoirs))
-            self.status_bar.showMessage(f"Showing {len(visible_wells)} wells in reservoirs: {reservoirs_str}")
+            self.status_bar.showMessage(f"Showing wells in reservoirs: {reservoirs_str}")
     
     def reset_reservoir_filters(self):
         """Reset all reservoir filters to show all wells"""
@@ -357,26 +359,56 @@ class WellProductionApp(QMainWindow):
         self.update_charts()
     
     def update_charts(self):
-        """Update charts with current selection"""
+        """Update charts with current selection, filtered by selected reservoirs"""
         # Get selected well names for title
         selected_wells = self.data_store.get_selected_wells()
         well_names = [well.well_name for well in selected_wells]
         
-        # Get production and injection data for selected wells
-        prod_data = self.data_store.get_production_for_selected()
-        inj_data = self.data_store.get_injection_for_selected()
+        # Determine which reservoirs to filter by
+        reservoirs_filter = None if self.reservoir_buttons['all'].isChecked() else self.selected_reservoirs
         
-        # Update charts
-        self.production_chart.update_chart(prod_data, well_names)
-        self.injection_chart.update_chart(inj_data, well_names)
+        # Get production and injection data for selected wells, filtered by reservoirs
+        prod_data = self.data_store.get_production_for_selected(reservoirs_filter)
+        inj_data = self.data_store.get_injection_for_selected(reservoirs_filter)
+        
+        # Update chart titles to include reservoir info if filtering
+        if reservoirs_filter and selected_wells:
+            if len(reservoirs_filter) == 1:
+                reservoir_name = next(iter(reservoirs_filter))
+                if len(selected_wells) == 1:
+                    well_title = f"{well_names[0]} ({reservoir_name})"
+                else:
+                    well_title = f"{len(selected_wells)} Wells ({reservoir_name})"
+            else:
+                reservoirs_str = ", ".join(sorted(reservoirs_filter))
+                if len(selected_wells) == 1:
+                    well_title = f"{well_names[0]} ({reservoirs_str})"
+                else:
+                    well_title = f"{len(selected_wells)} Wells ({reservoirs_str})"
+            
+            # Update charts with reservoir-specific titles
+            self.production_chart.update_chart(prod_data, [well_title])
+            self.injection_chart.update_chart(inj_data, [well_title])
+        else:
+            # Normal update with well names
+            self.production_chart.update_chart(prod_data, well_names)
+            self.injection_chart.update_chart(inj_data, well_names)
         
         # Update status bar
         if selected_wells:
             if len(selected_wells) == 1:
                 well = selected_wells[0]
-                status = f"Selected: {well.well_name} ({well.well_type}, {well.reservoir})"
+                status = f"Selected: {well.well_name}"
+                if reservoirs_filter:
+                    reservoirs_str = ", ".join(sorted(reservoirs_filter))
+                    status += f" (Arenas: {reservoirs_str})"
+                elif well.reservoir:
+                    status += f" ({well.well_type}, {well.reservoir})"
             else:
                 status = f"Selected: {len(selected_wells)} wells"
+                if reservoirs_filter:
+                    reservoirs_str = ", ".join(sorted(reservoirs_filter))
+                    status += f" (Arenas: {reservoirs_str})"
             self.status_bar.showMessage(status)
     
     def clear_selection(self):
@@ -393,8 +425,7 @@ class WellProductionApp(QMainWindow):
             well_count = len(self.data_store.wells)
             self.status_bar.showMessage(f"Showing all {well_count} wells")
         elif self.selected_reservoirs:
-            visible_wells = [well for well in self.data_store.wells.values() 
-                            if well.reservoir in self.selected_reservoirs]
+            visible_wells = self.data_store.get_wells_for_reservoirs(self.selected_reservoirs)
             reservoirs_str = ", ".join(sorted(self.selected_reservoirs))
             self.status_bar.showMessage(f"Showing {len(visible_wells)} wells in reservoirs: {reservoirs_str}")
         else:

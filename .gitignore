@@ -1,2 +1,7 @@
 /Data
 /venv
+/__pycache__
+*mdb
+*.ofm
+*.xlsx
+*.csv

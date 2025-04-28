@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from datetime import datetime
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Set
 import pandas as pd
 import numpy as np
 
@@ -29,15 +29,15 @@ class ProductionData:
         """Load data from a pandas DataFrame"""
         self.data = df
     
-    def get_monthly_oil_production(self, well_names: List[str] = None) -> pd.DataFrame:
-        """Get monthly oil production for specified wells"""
+    def get_monthly_oil_production(self, completion_names: List[str] = None) -> pd.DataFrame:
+        """Get monthly oil production for specified completions"""
         if self.data.empty:
             return pd.DataFrame()
             
         df = self.data.copy()
         
-        if well_names:
-            df = df[df['COMP_S_NAME'].isin(well_names)]
+        if completion_names:
+            df = df[df['COMP_S_NAME'].isin(completion_names)]
             
         # Group by month and sum production
         monthly = df.groupby(pd.Grouper(key='PROD_DT', freq='M')).agg({
@@ -65,7 +65,7 @@ class ProductionData:
         
         return monthly
         
-    def get_decline_curve_data(self, well_names: List[str] = None) -> Dict:
+    def get_decline_curve_data(self, completion_names: List[str] = None) -> Dict:
         """
         Calculate decline curve parameters for oil production
         Returns dict with parameters and fitted curve
@@ -73,7 +73,7 @@ class ProductionData:
         if self.data.empty:
             return {}
             
-        df = self.get_monthly_oil_production(well_names)
+        df = self.get_monthly_oil_production(completion_names)
         if df.empty:
             return {}
             
@@ -120,15 +120,15 @@ class InjectionData:
         """Load data from a pandas DataFrame"""
         self.data = df
     
-    def get_monthly_injection(self, well_names: List[str] = None) -> pd.DataFrame:
-        """Get monthly injection data for specified wells"""
+    def get_monthly_injection(self, completion_names: List[str] = None) -> pd.DataFrame:
+        """Get monthly injection data for specified completions"""
         if self.data.empty:
             return pd.DataFrame()
             
         df = self.data.copy()
         
-        if well_names:
-            df = df[df['COMPLETION_LEGAL_NAME'].isin(well_names)]
+        if completion_names:
+            df = df[df['COMPLETION_LEGAL_NAME'].isin(completion_names)]
             
         # Group by month and sum injection
         monthly = df.groupby(pd.Grouper(key='Date', freq='M')).agg({
@@ -154,14 +154,21 @@ class WellDataStore:
         self.production_data = ProductionData()
         self.injection_data = InjectionData()
         self.selected_wells: List[str] = []
+        
+        # New dictionary to track well to completions mapping
+        self.well_to_completions: Dict[str, List[str]] = {}
+        # New dictionary to track completions to reservoirs
+        self.completion_to_reservoir: Dict[str, str] = {}
     
     def load_wells(self, wells_df, well_types_df):
         """
         Load wells from DataFrames
         Exclude wells that have 'PLA' in their name
+        Store completion mapping information
         """
         for _, row in wells_df.iterrows():
             well_name = row['WELL_LEGAL_NAME']
+            completion_name = row['COMPLETION_LEGAL_NAME']
             
             # Skip wells with "PLA" in their name
             if "PLA" in well_name:
@@ -169,19 +176,34 @@ class WellDataStore:
                 
             well = Well(
                 well_name=well_name,
-                completion_name=row['COMPLETION_LEGAL_NAME'],
+                completion_name=completion_name,
                 x_coordinate=row['COMPLETION_COORDINATE_X'],
                 y_coordinate=row['COMPLETION_COORDINATE_Y']
             )
+            
+            # Store the well
             self.wells[well.well_name] = well
+            
+            # Track completions for each well
+            if well_name not in self.well_to_completions:
+                self.well_to_completions[well_name] = []
+            
+            if completion_name not in self.well_to_completions[well_name]:
+                self.well_to_completions[well_name].append(completion_name)
         
-        # Add well type information
+        # Add well type and reservoir information
         for _, row in well_types_df.iterrows():
-            well_name = row['COMPLETION_LEGAL_NAME']
+            completion_name = row['COMPLETION_LEGAL_NAME']
+            reservoir = row['RESERVORIO']
+            
+            # Store completion to reservoir mapping
+            if completion_name and reservoir:
+                self.completion_to_reservoir[completion_name] = reservoir
+            
             for well in self.wells.values():
-                if well.completion_name == well_name:
+                if well.completion_name == completion_name:
                     well.well_type = row['TIPO_POZO']
-                    well.reservoir = row['RESERVORIO']
+                    well.reservoir = reservoir
     
     def load_production_data(self, prod_df):
         """Load production data"""
@@ -233,24 +255,63 @@ class WellDataStore:
             return self.wells[well_name].selected
         return False
     
-    def get_production_for_selected(self) -> pd.DataFrame:
-        """Get production data for selected wells"""
-        if not self.selected_wells:
-            return pd.DataFrame()
-        
-        # Get completion names for selected wells
-        completion_names = [self.wells[name].completion_name for name in self.selected_wells 
-                           if name in self.wells]
-        
-        return self.production_data.get_monthly_oil_production(completion_names)
+    def get_completions_for_reservoirs(self, reservoirs: Set[str]) -> List[str]:
+        """Get completion names for the specified reservoirs"""
+        completions = []
+        for completion, reservoir in self.completion_to_reservoir.items():
+            if reservoir in reservoirs:
+                completions.append(completion)
+        return completions
     
-    def get_injection_for_selected(self) -> pd.DataFrame:
-        """Get injection data for selected wells"""
+    def get_wells_for_reservoirs(self, reservoirs: Set[str]) -> Set[str]:
+        """Get well names that have completions in any of the specified reservoirs"""
+        wells = set()
+        for well_name, completions in self.well_to_completions.items():
+            for completion in completions:
+                reservoir = self.completion_to_reservoir.get(completion)
+                if reservoir and reservoir in reservoirs:
+                    wells.add(well_name)
+                    break
+        return wells
+    
+    def get_completions_for_selected_wells_and_reservoirs(self, reservoirs: Set[str] = None) -> List[str]:
+        """
+        Get completion names for selected wells filtered by reservoirs if specified
+        """
         if not self.selected_wells:
+            return []
+        
+        completions = []
+        
+        for well_name in self.selected_wells:
+            if well_name in self.well_to_completions:
+                for completion in self.well_to_completions[well_name]:
+                    completion_reservoir = self.completion_to_reservoir.get(completion)
+                    
+                    # Include completion if no reservoir filter or if matches reservoir filter
+                    if (not reservoirs) or (completion_reservoir and completion_reservoir in reservoirs):
+                        completions.append(completion)
+        
+        return completions
+    
+    def get_production_for_selected(self, reservoirs: Set[str] = None) -> pd.DataFrame:
+        """
+        Get production data for selected wells, filtered by reservoirs if specified
+        """
+        completions = self.get_completions_for_selected_wells_and_reservoirs(reservoirs)
+        
+        if not completions:
             return pd.DataFrame()
         
-        # Get completion names for selected wells
-        completion_names = [self.wells[name].completion_name for name in self.selected_wells 
-                           if name in self.wells]
+        return self.production_data.get_monthly_oil_production(completions)
+    
+    def get_injection_for_selected(self, reservoirs: Set[str] = None) -> pd.DataFrame:
+        """
+        Get injection data for selected wells, filtered by reservoirs if specified
+        """
+        completions = self.get_completions_for_selected_wells_and_reservoirs(reservoirs)
         
-        return self.injection_data.get_monthly_injection(completion_names)
+        if not completions:
+            return pd.DataFrame()
+        
+        return self.injection_data.get_monthly_injection(completions)
