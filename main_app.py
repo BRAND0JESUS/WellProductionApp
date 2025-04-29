@@ -169,7 +169,10 @@ class WellProductionApp(QMainWindow):
                 well_type = "INJECTION"
             else:
                 well_type = "PRODUCTION"
-            self.map_widget.add_well(well_name, well.x_coordinate, well.y_coordinate, well_type)
+                
+            # Add well with active status
+            self.map_widget.add_well(well_name, well.x_coordinate, well.y_coordinate, 
+                                     well_type, well.active)
         
         # Create reservoir buttons
         self.create_reservoir_buttons()
@@ -179,7 +182,13 @@ class WellProductionApp(QMainWindow):
         
         # Update status
         well_count = len(self.data_store.wells)
-        self.status_bar.showMessage(f"Loaded {well_count} wells from database")
+        active_wells = sum(1 for well in self.data_store.wells.values() if well.active)
+        inactive_wells = well_count - active_wells
+        
+        self.status_bar.showMessage(
+            f"Loaded {well_count} wells from database " +
+            f"({active_wells} active, {inactive_wells} inactive as of Dec 2024)"
+        )
     
     def create_reservoir_buttons(self):
         """Create buttons for each unique reservoir"""
@@ -399,13 +408,22 @@ class WellProductionApp(QMainWindow):
             if len(selected_wells) == 1:
                 well = selected_wells[0]
                 status = f"Selected: {well.well_name}"
+                active_status = "Active" if well.active else "Inactive"
                 if reservoirs_filter:
                     reservoirs_str = ", ".join(sorted(reservoirs_filter))
-                    status += f" (Arenas: {reservoirs_str})"
+                    status += f" ({well.well_type}, {active_status}, Arenas: {reservoirs_str})"
                 elif well.reservoir:
-                    status += f" ({well.well_type}, {well.reservoir})"
+                    status += f" ({well.well_type}, {active_status}, {well.reservoir})"
+                else:
+                    status += f" ({well.well_type}, {active_status})"
             else:
                 status = f"Selected: {len(selected_wells)} wells"
+                
+                # Count active/inactive wells
+                active_count = sum(1 for well in selected_wells if well.active)
+                inactive_count = len(selected_wells) - active_count
+                status += f" ({active_count} active, {inactive_count} inactive)"
+                
                 if reservoirs_filter:
                     reservoirs_str = ", ".join(sorted(reservoirs_filter))
                     status += f" (Arenas: {reservoirs_str})"
@@ -423,11 +441,24 @@ class WellProductionApp(QMainWindow):
         # Update status
         if self.reservoir_buttons['all'].isChecked():
             well_count = len(self.data_store.wells)
-            self.status_bar.showMessage(f"Showing all {well_count} wells")
+            active_wells = sum(1 for well in self.data_store.wells.values() if well.active)
+            inactive_wells = well_count - active_wells
+            self.status_bar.showMessage(
+                f"Showing all {well_count} wells " +
+                f"({active_wells} active, {inactive_wells} inactive)"
+            )
         elif self.selected_reservoirs:
             visible_wells = self.data_store.get_wells_for_reservoirs(self.selected_reservoirs)
+            # Count active/inactive wells in the filter
+            active_wells = sum(1 for well_name in visible_wells if self.data_store.wells[well_name].active)
+            inactive_wells = len(visible_wells) - active_wells
+            
             reservoirs_str = ", ".join(sorted(self.selected_reservoirs))
-            self.status_bar.showMessage(f"Showing {len(visible_wells)} wells in reservoirs: {reservoirs_str}")
+            self.status_bar.showMessage(
+                f"Showing {len(visible_wells)} wells " +
+                f"({active_wells} active, {inactive_wells} inactive) " +
+                f"in reservoirs: {reservoirs_str}"
+            )
         else:
             self.status_bar.showMessage("Selection cleared")
     
@@ -447,7 +478,14 @@ class WellProductionApp(QMainWindow):
         
         # Update status
         selected_count = len(self.data_store.selected_wells)
-        self.status_bar.showMessage(f"Selected all {selected_count} visible wells")
+        active_count = sum(1 for name in self.data_store.selected_wells 
+                          if name in self.data_store.wells and self.data_store.wells[name].active)
+        inactive_count = selected_count - active_count
+        
+        self.status_bar.showMessage(
+            f"Selected all {selected_count} visible wells " +
+            f"({active_count} active, {inactive_count} inactive)"
+        )
     
     def toggle_multi_selection_mode(self, state):
         """Toggle between single and multi-selection modes"""
@@ -485,7 +523,14 @@ class WellProductionApp(QMainWindow):
         
         # Update status bar
         if matching_wells:
-            self.status_bar.showMessage(f"Selected {len(matching_wells)} wells matching '{search_text}'")
+            active_count = sum(1 for name in matching_wells 
+                              if name in self.data_store.wells and self.data_store.wells[name].active)
+            inactive_count = len(matching_wells) - active_count
+            
+            self.status_bar.showMessage(
+                f"Selected {len(matching_wells)} wells matching '{search_text}' " +
+                f"({active_count} active, {inactive_count} inactive)"
+            )
         else:
             self.status_bar.showMessage(f"No wells found matching '{search_text}'")
 

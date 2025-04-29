@@ -19,7 +19,7 @@ class WellMapWidget(QWidget):
         self.setLayout(self.layout)
         
         # Map data
-        self.wells = {}  # Dict of well_name: (x, y, selected, well_type)
+        self.wells = {}  # Dict of well_name: (x, y, selected, well_type, active)
         self.map_bounds = QRectF(0, 0, 100, 100)  # Default map bounds
         self.scale_factor = 1.0
         self.offset_x = 0
@@ -33,9 +33,14 @@ class WellMapWidget(QWidget):
         # Well display properties
         self.well_radius = 10
         self.selected_well_radius = 15
-        self.production_well_color = QColor(0, 150, 0)  # Green
-        self.injection_well_color = QColor(0, 0, 200)   # Blue
-        self.selected_color = QColor(200, 0, 0)         # Red
+        
+        # Color definitions for well states
+        self.production_active_color = QColor(0, 150, 0)    # Green
+        self.production_inactive_color = QColor(0, 150, 0)  # Green border only
+        self.injection_active_color = QColor(0, 0, 200)     # Blue
+        self.injection_inactive_color = QColor(0, 0, 200)   # Blue border only
+        self.other_well_color = QColor(150, 150, 150)       # Grey
+        self.selected_color = QColor(200, 0, 0)             # Red
         
         # Enable mouse tracking
         self.setMouseTracking(True)
@@ -51,17 +56,24 @@ class WellMapWidget(QWidget):
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self.show_context_menu)
     
-    def add_well(self, well_name, x, y, well_type="PRODUCTION"):
+    def add_well(self, well_name, x, y, well_type="PRODUCTION", active=False):
         """Add a well to the map"""
         self.wells[well_name] = {
             'x': x,
             'y': y,
             'selected': False,
             'type': well_type.upper(),
-            'visible': True  # Add visibility property
+            'visible': True,  # Add visibility property
+            'active': active  # Add active state property
         }
         self.update_map_bounds()
         self.update()
+    
+    def set_well_activity(self, well_name, active):
+        """Set the activity state of a well"""
+        if well_name in self.wells:
+            self.wells[well_name]['active'] = active
+            self.update()
     
     def set_well_visibility(self, well_name, visible):
         """Set visibility of a well"""
@@ -207,20 +219,40 @@ class WellMapWidget(QWidget):
                 
             x, y = self.transform_point(well_data['x'], well_data['y'])
             
-            # Select color based on well type and selection state
+            # Select pen (border) color and brush (fill) color based on well type, activity, and selection
             if well_data['selected']:
-                color = self.selected_color
+                # Use select color for selected wells
+                pen_color = self.selected_color.darker()
+                brush_color = self.selected_color
                 radius = self.selected_well_radius
+                pen_width = 2
+                
             else:
                 radius = self.well_radius
-                if well_data['type'] == 'INJECTION':
-                    color = self.injection_well_color
+                pen_width = 2
+                well_type = well_data['type']
+                
+                if well_type == 'PRODUCTION':
+                    pen_color = self.production_active_color.darker()
+                    if well_data['active']:
+                        brush_color = self.production_active_color
+                    else:
+                        brush_color = QColor(0, 0, 0, 0)  # Transparent fill
+                        
+                elif well_type == 'INJECTION':
+                    pen_color = self.injection_active_color.darker()
+                    if well_data['active']:
+                        brush_color = self.injection_active_color
+                    else:
+                        brush_color = QColor(0, 0, 0, 0)  # Transparent fill
+                        
                 else:
-                    color = self.production_well_color
+                    pen_color = self.other_well_color.darker()
+                    brush_color = self.other_well_color
             
             # Draw well point
-            painter.setPen(QPen(color.darker(), 2))
-            painter.setBrush(QBrush(color))
+            painter.setPen(QPen(pen_color, pen_width))
+            painter.setBrush(QBrush(brush_color))
             painter.drawEllipse(QPointF(x, y), radius, radius)
             
             # Draw well name

@@ -14,6 +14,7 @@ class Well:
     well_type: str = ""
     reservoir: str = ""
     selected: bool = False
+    active: bool = False  # Added active status flag
     
     def __str__(self):
         return f"Well: {self.well_name} ({self.completion_name})"
@@ -64,6 +65,38 @@ class ProductionData:
         monthly.fillna(0, inplace=True)
         
         return monthly
+    
+    def is_well_active_in_december_2024(self, completion_name: str) -> bool:
+        """
+        Check if a well was active in December 2024
+        Returns True if the well had production data > 0 in Dec 2024
+        """
+        if self.data.empty:
+            return False
+            
+        # Filter for the specific completion
+        completion_data = self.data[self.data['COMP_S_NAME'] == completion_name]
+        
+        # Check for December 2024 data
+        dec_2024 = pd.Timestamp('2024-12-01')
+        
+        # Get data for December 2024
+        dec_data = completion_data[
+            (completion_data['PROD_DT'].dt.year == 2024) & 
+            (completion_data['PROD_DT'].dt.month == 12)
+        ]
+        
+        # Check if there's any production
+        if dec_data.empty:
+            return False
+            
+        # Check if there's any oil or water production > 0
+        has_production = (
+            (dec_data['VO_OIL_PROD'].sum() > 0) or 
+            (dec_data['VO_WAT_PROD'].sum() > 0)
+        )
+        
+        return has_production
         
     def get_decline_curve_data(self, completion_names: List[str] = None) -> Dict:
         """
@@ -144,6 +177,32 @@ class InjectionData:
         monthly.fillna(0, inplace=True)
         
         return monthly
+    
+    def is_well_active_in_december_2024(self, completion_name: str) -> bool:
+        """
+        Check if an injection well was active in December 2024
+        Returns True if the well had injection data > 0 in Dec 2024
+        """
+        if self.data.empty:
+            return False
+            
+        # Filter for the specific completion
+        completion_data = self.data[self.data['COMPLETION_LEGAL_NAME'] == completion_name]
+        
+        # Check for December 2024 data
+        dec_data = completion_data[
+            (completion_data['Date'].dt.year == 2024) & 
+            (completion_data['Date'].dt.month == 12)
+        ]
+        
+        # Check if there's any injection
+        if dec_data.empty:
+            return False
+            
+        # Check if there's any water injection > 0
+        has_injection = dec_data['Water_INJ_CALDAY'].sum() > 0
+        
+        return has_injection
 
 
 class WellDataStore:
@@ -210,12 +269,45 @@ class WellDataStore:
         # Filter out production data for excluded wells (those with "PLA" in their name)
         filtered_df = prod_df[~prod_df['COMP_S_NAME'].str.contains('PLA', na=False)]
         self.production_data.load_from_dataframe(filtered_df)
+        
+        # Update active status for production wells
+        self.update_well_activity_status()
     
     def load_injection_data(self, inj_df):
         """Load injection data"""
         # Filter out injection data for excluded wells (those with "PLA" in their name)
         filtered_df = inj_df[~inj_df['COMPLETION_LEGAL_NAME'].str.contains('PLA', na=False)]
         self.injection_data.load_from_dataframe(filtered_df)
+        
+        # Update active status for injection wells
+        self.update_well_activity_status()
+    
+    def update_well_activity_status(self):
+        """
+        Update well activity status based on December 2024 production/injection data
+        """
+        for well_name, well in self.wells.items():
+            active = False
+            
+            # Get completions for this well
+            completions = self.well_to_completions.get(well_name, [])
+            
+            if completions:
+                if well.well_type and well.well_type.upper() == "INYECTOR":
+                    # Check injection data for any completion of this well
+                    for completion in completions:
+                        if self.injection_data.is_well_active_in_december_2024(completion):
+                            active = True
+                            break
+                else:
+                    # Check production data for any completion of this well
+                    for completion in completions:
+                        if self.production_data.is_well_active_in_december_2024(completion):
+                            active = True
+                            break
+            
+            # Update well status
+            well.active = active
     
     def select_well(self, well_name: str):
         """Select a well by name"""
