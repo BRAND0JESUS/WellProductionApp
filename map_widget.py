@@ -1,6 +1,6 @@
 from PyQt5.QtWidgets import QWidget, QVBoxLayout, QMenu, QApplication
 from PyQt5.QtCore import pyqtSignal, pyqtSlot, Qt, QPointF, QRectF
-from PyQt5.QtGui import QPainter, QPen, QBrush, QColor
+from PyQt5.QtGui import QPainter, QPen, QBrush, QColor, QPolygonF, QPainterPath
 
 class WellMapWidget(QWidget):
     """
@@ -203,6 +203,60 @@ class WellMapWidget(QWidget):
         
         return mx, my
     
+    def draw_injection_well(self, painter, x, y, radius, is_active=True, is_selected=False):
+        """Draw an injection well as a circle with arrow going through it"""
+        # Save painter state
+        painter.save()
+        
+        # Set colors based on selection and activity state
+        if is_selected:
+            pen_color = self.selected_color.darker()
+            brush_color = self.selected_color if is_active else QColor(0, 0, 0, 0)
+        else:
+            pen_color = self.injection_active_color.darker()
+            brush_color = self.injection_active_color if is_active else QColor(0, 0, 0, 0)
+        
+        # Draw circle
+        painter.setPen(QPen(pen_color, 2))
+        painter.setBrush(QBrush(brush_color))
+        painter.drawEllipse(QPointF(x, y), radius, radius)
+        
+        # Draw arrow going through the circle
+        # Calculate arrow size based on radius
+        arrow_length = radius * 2.5
+        arrow_head_size = radius * 0.6
+        
+        # Set arrow pen 
+        pen_width = 2.5 if is_selected else 2.0
+        painter.setPen(QPen(pen_color, pen_width))
+        
+        # Starting and ending points for the arrow line
+        start_x = x + arrow_length/2
+        start_y = y - arrow_length/2
+        end_x = x - arrow_length/2
+        end_y = y + arrow_length/2
+        
+        # Draw the main arrow line
+        painter.drawLine(QPointF(start_x, start_y), QPointF(end_x, end_y))
+        
+        # Draw the arrowhead at the end
+        arrow_points = QPolygonF()
+        arrow_points.append(QPointF(end_x, end_y))
+        arrow_points.append(QPointF(end_x + arrow_head_size, end_y - arrow_head_size/2))
+        arrow_points.append(QPointF(end_x + arrow_head_size/2, end_y - arrow_head_size))
+        
+        # Create a path for the arrowhead
+        path = QPainterPath()
+        path.addPolygon(arrow_points)
+        path.closeSubpath()
+        
+        # Fill the arrowhead
+        painter.setBrush(QBrush(pen_color))
+        painter.drawPath(path)
+        
+        # Restore painter state
+        painter.restore()
+    
     def paintEvent(self, event):
         """Draw the map and wells"""
         painter = QPainter(self)
@@ -218,43 +272,40 @@ class WellMapWidget(QWidget):
                 continue
                 
             x, y = self.transform_point(well_data['x'], well_data['y'])
+            radius = self.selected_well_radius if well_data['selected'] else self.well_radius
             
-            # Select pen (border) color and brush (fill) color based on well type, activity, and selection
-            if well_data['selected']:
-                # Use select color for selected wells
-                pen_color = self.selected_color.darker()
-                brush_color = self.selected_color
-                radius = self.selected_well_radius
-                pen_width = 2
-                
+            if well_data['type'] == 'INJECTION':
+                # Draw injector using the specialized function
+                self.draw_injection_well(
+                    painter, 
+                    x, 
+                    y, 
+                    radius, 
+                    is_active=well_data['active'],
+                    is_selected=well_data['selected']
+                )
             else:
-                radius = self.well_radius
-                pen_width = 2
-                well_type = well_data['type']
-                
-                # Fixed: Proper handling of PRODUCTION vs INJECTION well types
-                if well_type == 'PRODUCTION':
+                # Draw production well (original style)
+                if well_data['selected']:
+                    # Use select color for selected wells
+                    pen_color = self.selected_color.darker()
+                    brush_color = self.selected_color
+                    pen_width = 2
+                else:
+                    pen_width = 2
+                    well_type = well_data['type']
+                    
+                    # Default to production well style
                     pen_color = self.production_active_color.darker()
                     if well_data['active']:
                         brush_color = self.production_active_color
                     else:
                         brush_color = QColor(0, 0, 0, 0)  # Transparent fill
                         
-                elif well_type == 'INJECTION':
-                    pen_color = self.injection_active_color.darker()
-                    if well_data['active']:
-                        brush_color = self.injection_active_color
-                    else:
-                        brush_color = QColor(0, 0, 0, 0)  # Transparent fill
-                        
-                else:
-                    pen_color = self.other_well_color.darker()
-                    brush_color = self.other_well_color
-            
-            # Draw well point
-            painter.setPen(QPen(pen_color, pen_width))
-            painter.setBrush(QBrush(brush_color))
-            painter.drawEllipse(QPointF(x, y), radius, radius)
+                # Draw well point
+                painter.setPen(QPen(pen_color, pen_width))
+                painter.setBrush(QBrush(brush_color))
+                painter.drawEllipse(QPointF(x, y), radius, radius)
             
             # Draw well name
             painter.setPen(QPen(Qt.black, 1))
