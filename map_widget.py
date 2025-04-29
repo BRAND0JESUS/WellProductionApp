@@ -232,6 +232,7 @@ class WellMapWidget(QWidget):
                 pen_width = 2
                 well_type = well_data['type']
                 
+                # Fixed: Proper handling of PRODUCTION vs INJECTION well types
                 if well_type == 'PRODUCTION':
                     pen_color = self.production_active_color.darker()
                     if well_data['active']:

@@ -11,7 +11,7 @@ class Well:
     completion_name: str
     x_coordinate: float
     y_coordinate: float
-    well_type: str = ""
+    well_type: str = ""  # "PRODUCTION" or "INJECTION"
     reservoir: str = ""
     selected: bool = False
     active: bool = False  # Added active status flag
@@ -97,6 +97,30 @@ class ProductionData:
         )
         
         return has_production
+    
+    def get_latest_production_date(self, completion_name: str) -> pd.Timestamp:
+        """
+        Get the latest date with production data for a completion
+        """
+        if self.data.empty:
+            return None
+            
+        # Filter for the specific completion
+        completion_data = self.data[self.data['COMP_S_NAME'] == completion_name]
+        
+        if completion_data.empty:
+            return None
+            
+        # Get the latest date with production > 0
+        prod_data = completion_data[
+            (completion_data['VO_OIL_PROD'] > 0) | 
+            (completion_data['VO_WAT_PROD'] > 0)
+        ]
+        
+        if prod_data.empty:
+            return None
+            
+        return prod_data['PROD_DT'].max()
         
     def get_decline_curve_data(self, completion_names: List[str] = None) -> Dict:
         """
@@ -203,6 +227,27 @@ class InjectionData:
         has_injection = dec_data['Water_INJ_CALDAY'].sum() > 0
         
         return has_injection
+    
+    def get_latest_injection_date(self, completion_name: str) -> pd.Timestamp:
+        """
+        Get the latest date with injection data for a completion
+        """
+        if self.data.empty:
+            return None
+            
+        # Filter for the specific completion
+        completion_data = self.data[self.data['COMPLETION_LEGAL_NAME'] == completion_name]
+        
+        if completion_data.empty:
+            return None
+            
+        # Get the latest date with injection > 0
+        inj_data = completion_data[completion_data['Water_INJ_CALDAY'] > 0]
+        
+        if inj_data.empty:
+            return None
+            
+        return inj_data['Date'].max()
 
 
 class WellDataStore:
@@ -261,6 +306,7 @@ class WellDataStore:
             
             for well in self.wells.values():
                 if well.completion_name == completion_name:
+                    # Store the database type information (will be overridden later if needed)
                     well.well_type = row['TIPO_POZO']
                     well.reservoir = reservoir
     
@@ -270,8 +316,7 @@ class WellDataStore:
         filtered_df = prod_df[~prod_df['COMP_S_NAME'].str.contains('PLA', na=False)]
         self.production_data.load_from_dataframe(filtered_df)
         
-        # Update active status for production wells
-        self.update_well_activity_status()
+        # We'll update well activity status and type after loading both production and injection data
     
     def load_injection_data(self, inj_df):
         """Load injection data"""
@@ -279,32 +324,89 @@ class WellDataStore:
         filtered_df = inj_df[~inj_df['COMPLETION_LEGAL_NAME'].str.contains('PLA', na=False)]
         self.injection_data.load_from_dataframe(filtered_df)
         
-        # Update active status for injection wells
-        self.update_well_activity_status()
+        # Now update well activity status and types
+        self.update_well_types_and_activity()
     
-    def update_well_activity_status(self):
+    def determine_well_type(self, well_name):
         """
-        Update well activity status based on December 2024 production/injection data
+        Determine well type based on actual production/injection data
+        - If a well has only injection data, it's an INJECTION well
+        - If a well has only production data, it's a PRODUCTION well
+        - If a well has both, determine based on latest data
+        """
+        completions = self.well_to_completions.get(well_name, [])
+        
+        has_prod_data = False
+        has_inj_data = False
+        latest_prod_date = None
+        latest_inj_date = None
+        
+        # Check for production and injection data
+        for completion in completions:
+            # Check production data
+            prod_date = self.production_data.get_latest_production_date(completion)
+            if prod_date is not None:
+                has_prod_data = True
+                if latest_prod_date is None or prod_date > latest_prod_date:
+                    latest_prod_date = prod_date
+            
+            # Check injection data
+            inj_date = self.injection_data.get_latest_injection_date(completion)
+            if inj_date is not None:
+                has_inj_data = True
+                if latest_inj_date is None or inj_date > latest_inj_date:
+                    latest_inj_date = inj_date
+        
+        # Determine well type based on data
+        if has_inj_data and not has_prod_data:
+            return "INJECTION"
+        elif has_prod_data and not has_inj_data:
+            return "PRODUCTION"
+        elif has_prod_data and has_inj_data:
+            # If well has both types of data, use the most recent
+            if latest_inj_date is not None and latest_prod_date is not None:
+                if latest_inj_date >= latest_prod_date:
+                    return "INJECTION"
+                else:
+                    return "PRODUCTION"
+            # This should not happen, but we need a fallback
+            return "PRODUCTION"
+        else:
+            # No data for this well, use the database classification or default to PRODUCTION
+            if well_name in self.wells and self.wells[well_name].well_type is not None:
+                db_well_type = self.wells[well_name].well_type.upper()
+                if db_well_type == "INYECTOR":
+                    return "INJECTION"
+            # Default case: return PRODUCTION
+            return "PRODUCTION"
+    
+    def update_well_types_and_activity(self):
+        """
+        Update well types and activity status based on data:
+        1. Determine well type based on actual data
+        2. Update active status based on December 2024 data
         """
         for well_name, well in self.wells.items():
-            active = False
+            # Determine well type based on actual data
+            determined_type = self.determine_well_type(well_name)
+            well.well_type = determined_type
             
-            # Get completions for this well
+            # Update activity status
+            active = False
             completions = self.well_to_completions.get(well_name, [])
             
-            if completions:
-                if well.well_type and well.well_type.upper() == "INYECTOR":
-                    # Check injection data for any completion of this well
-                    for completion in completions:
-                        if self.injection_data.is_well_active_in_december_2024(completion):
-                            active = True
-                            break
-                else:
-                    # Check production data for any completion of this well
-                    for completion in completions:
-                        if self.production_data.is_well_active_in_december_2024(completion):
-                            active = True
-                            break
+            if determined_type == "INJECTION":
+                # Check injection activity
+                for completion in completions:
+                    if self.injection_data.is_well_active_in_december_2024(completion):
+                        active = True
+                        break
+            else:
+                # Check production activity
+                for completion in completions:
+                    if self.production_data.is_well_active_in_december_2024(completion):
+                        active = True
+                        break
             
             # Update well status
             well.active = active
