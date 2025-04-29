@@ -1,6 +1,6 @@
 from PyQt5.QtWidgets import QWidget, QVBoxLayout, QMenu, QApplication
 from PyQt5.QtCore import pyqtSignal, pyqtSlot, Qt, QPointF, QRectF
-from PyQt5.QtGui import QPainter, QPen, QBrush, QColor, QPainterPath
+from PyQt5.QtGui import QPainter, QPen, QBrush, QColor
 
 class WellMapWidget(QWidget):
     """
@@ -158,9 +158,11 @@ class WellMapWidget(QWidget):
         center_x = widget_width / 2
         center_y = widget_height / 2
         
-        # Transform point
+        # Transform point with y-axis inverted (subtract from height to flip)
         tx = center_x + (x - self.map_bounds.center().x()) * scale + self.offset_x
-        ty = center_y + (y - self.map_bounds.center().y()) * scale + self.offset_y
+        
+        # Invert the y-coordinate to correct north-south orientation
+        ty = center_y - (y - self.map_bounds.center().y()) * scale + self.offset_y
         
         return tx, ty
     
@@ -181,9 +183,11 @@ class WellMapWidget(QWidget):
         center_x = widget_width / 2
         center_y = widget_height / 2
         
-        # Transform point
+        # Inverse transform with y-axis correction
         mx = self.map_bounds.center().x() + (x - center_x - self.offset_x) / scale
-        my = self.map_bounds.center().y() + (y - center_y - self.offset_y) / scale
+        
+        # Invert the y-coordinate to correct north-south orientation
+        my = self.map_bounds.center().y() - (y - center_y - self.offset_y) / scale
         
         return mx, my
     
@@ -233,6 +237,10 @@ class WellMapWidget(QWidget):
             
             selection_rect = QRectF(min(x1, x2), min(y1, y2), abs(x2-x1), abs(y2-y1))
             painter.drawRect(selection_rect)
+    
+    def draw_compass(self, painter):
+        """Draw a simple north arrow compass in the top-right corner"""
+        pass
     
     def mousePressEvent(self, event):
         """Handle mouse press events"""
