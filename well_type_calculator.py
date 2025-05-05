@@ -206,7 +206,9 @@ class WellTypeCalculator:
         PRODUCTION, INJECTION, or DUAL each month
         
         Takes into account historical well types to maintain classification
-        when there is no current data
+        when there is no current data. If a well has no current data:
+        - If previously producing, it remains PRODUCTION until injection appears
+        - If previously injecting, it remains INJECTION until production appears
         """
         # If both dataframes are empty, return empty result
         if prod_monthly.empty and inj_monthly.empty:
@@ -246,7 +248,6 @@ class WellTypeCalculator:
             'water_inj_rate': 0.0
         }, inplace=True)
         
-        # Vectorized classification for better performance
         # Calculate has_prod and has_inj as boolean masks (current month)
         has_current_prod = (merged['oil_rate'] > 0) | (merged['water_rate'] > 0)
         has_current_inj = merged['water_inj_rate'] > 0
@@ -268,32 +269,66 @@ class WellTypeCalculator:
         
         # CASE 4: Wells with neither production nor injection in the current month
         # These need special handling based on history
-        
-        # Create a mask for wells with no current production or injection
         no_current_data = ~has_current_prod & ~has_current_inj
         
         if no_current_data.any():
-            # For each well in this category, check its history
+            # Process each well with chronological analysis
             for well_name in merged.loc[no_current_data, 'well_name'].unique():
-                if well_name in historical_well_types:
-                    history = historical_well_types[well_name]
+                # Get all records for this well
+                well_data = merged[merged['well_name'] == well_name].copy()
+                
+                # Sort by year and month to establish chronological order
+                well_data = well_data.sort_values(['year', 'month'])
+                
+                # Reset index for proper sequential processing
+                well_data = well_data.reset_index(drop=True)
+                
+                # Initialize a variable to track the last known well type
+                last_known_type = None
+                
+                # First determine if this well has any history in the data
+                has_prod_history = (well_data['oil_rate'] > 0).any() or (well_data['water_rate'] > 0).any()
+                has_inj_history = (well_data['water_inj_rate'] > 0).any()
+                
+                # If no history in the data, check the historical_well_types
+                if not has_prod_history and not has_inj_history:
+                    if well_name in historical_well_types:
+                        history = historical_well_types[well_name]
+                        if history['has_production_history'] and not history['has_injection_history']:
+                            last_known_type = 'PRODUCTION'
+                        elif not history['has_production_history'] and history['has_injection_history']:
+                            last_known_type = 'INJECTION'
+                        elif history['has_production_history'] and history['has_injection_history']:
+                            # If has both types of history, use PRODUCTION as default
+                            last_known_type = 'PRODUCTION'
+                
+                # Now process each month in chronological order
+                for idx in range(len(well_data)):
+                    row = well_data.iloc[idx]
                     
-                    # Apply the business rule:
-                    # If well has production history and no injection history, keep as PRODUCTION
-                    if history['has_production_history'] and not history['has_injection_history']:
-                        well_rows = (merged['well_name'] == well_name) & no_current_data
-                        merged.loc[well_rows, 'well_type'] = 'PRODUCTION'
+                    # Check if this month has production or injection
+                    has_prod = row['oil_rate'] > 0 or row['water_rate'] > 0
+                    has_inj = row['water_inj_rate'] > 0
                     
-                    # If well has injection history and no production history, keep as INJECTION
-                    elif not history['has_production_history'] and history['has_injection_history']:
-                        well_rows = (merged['well_name'] == well_name) & no_current_data
-                        merged.loc[well_rows, 'well_type'] = 'INJECTION'
-                    
-                    # If well has both production and injection history, determine based on which is more recent
-                    # This would require additional data processing - for now, default to PRODUCTION
-                    elif history['has_production_history'] and history['has_injection_history']:
-                        well_rows = (merged['well_name'] == well_name) & no_current_data
-                        merged.loc[well_rows, 'well_type'] = 'PRODUCTION'
+                    if has_prod and has_inj:
+                        # Both production and injection - update last known type
+                        last_known_type = 'DUAL'
+                    elif has_prod:
+                        # Only production
+                        last_known_type = 'PRODUCTION'
+                    elif has_inj:
+                        # Only injection
+                        last_known_type = 'INJECTION'
+                    else:
+                        # No data this month - apply the last known type if we have one
+                        if last_known_type is not None:
+                            # Find this month in the original merged DataFrame
+                            mask = ((merged['well_name'] == well_name) & 
+                                    (merged['year'] == row['year']) & 
+                                    (merged['month'] == row['month']))
+                            
+                            # Update the well type in the merged DataFrame
+                            merged.loc[mask, 'well_type'] = last_known_type
         
         # Sort the results
         result = merged.sort_values(['well_name', 'year', 'month']).reset_index(drop=True)
@@ -316,7 +351,7 @@ class WellTypeCalculator:
             result.loc[dual_wells, 'remarks'] = remarks.values
         
         return result
-    
+
     def calculate_reservoir_well_types(self):
         """
         Modified to just return the monthly well types with a dummy reservoir column
