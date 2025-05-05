@@ -266,10 +266,15 @@ class WellDataStore:
     
     def load_wells(self, wells_df, well_types_df):
         """
-        Load wells from DataFrames
+        Load wells from DataFrames - Versión mejorada para un solo punto por pozo
         Exclude wells that have 'PLA' in their name
-        Store completion mapping information
+        Handle multiple completions per well correctly
         """
+        # Primero, necesitamos crear un mapping de well_name -> coordenadas
+        # para asegurarnos de usar las mismas coordenadas para cada pozo
+        well_coordinates = {}
+        
+        # Procesar cada fila del DataFrame
         for _, row in wells_df.iterrows():
             well_name = row['WELL_LEGAL_NAME']
             completion_name = row['COMPLETION_LEGAL_NAME']
@@ -277,16 +282,24 @@ class WellDataStore:
             # Skip wells with "PLA" in their name
             if "PLA" in well_name:
                 continue
-                
-            well = Well(
-                well_name=well_name,
-                completion_name=completion_name,
-                x_coordinate=row['COMPLETION_COORDINATE_X'],
-                y_coordinate=row['COMPLETION_COORDINATE_Y']
-            )
             
-            # Store the well
-            self.wells[well.well_name] = well
+            # Guarda las coordenadas del pozo si aún no se han guardado
+            if well_name not in well_coordinates:
+                well_coordinates[well_name] = (
+                    row['COMPLETION_COORDINATE_X'],
+                    row['COMPLETION_COORDINATE_Y']
+                )
+            
+            # Si es la primera vez que procesamos este pozo, crea el objeto Well
+            if well_name not in self.wells:
+                well = Well(
+                    well_name=well_name,
+                    completion_name=completion_name,  # Usamos la primera completación como predeterminada
+                    x_coordinate=well_coordinates[well_name][0],
+                    y_coordinate=well_coordinates[well_name][1]
+                )
+                # Store the well
+                self.wells[well.well_name] = well
             
             # Track completions for each well
             if well_name not in self.well_to_completions:
@@ -304,11 +317,18 @@ class WellDataStore:
             if completion_name and reservoir:
                 self.completion_to_reservoir[completion_name] = reservoir
             
-            for well in self.wells.values():
-                if well.completion_name == completion_name:
-                    # Store the database type information (will be overridden later if needed)
-                    well.well_type = row['TIPO_POZO']
-                    well.reservoir = reservoir
+            # Encontrar qué pozo tiene esta completación
+            for well_name, completions in self.well_to_completions.items():
+                if completion_name in completions:
+                    # Si el pozo ya tiene un tipo asignado, no lo sobrescribimos
+                    # Solo lo actualizaremos después basado en datos reales
+                    if not self.wells[well_name].well_type:
+                        self.wells[well_name].well_type = row['TIPO_POZO']
+                    
+                    # Para el reservorio, podríamos almacenar múltiples reservorios por pozo
+                    # pero por ahora, simplemente lo dejamos como está
+                    if not self.wells[well_name].reservoir:
+                        self.wells[well_name].reservoir = reservoir
     
     def load_production_data(self, prod_df):
         """Load production data"""
@@ -411,6 +431,112 @@ class WellDataStore:
             # Update well status
             well.active = active
     
+    # NUEVO: Método para verificar si un pozo está activo en un reservorio específico
+    def is_well_active_in_reservoir(self, well_name: str, reservoir: str) -> bool:
+        """
+        Determina si un pozo está activo en un reservorio específico.
+        Un pozo está activo en un reservorio si tiene al menos una completación
+        activa en ese reservorio.
+        """
+        if well_name not in self.well_to_completions:
+            return False
+            
+        # Obtener completaciones del pozo
+        completions = self.well_to_completions[well_name]
+        
+        # Verificar cada completación
+        for completion in completions:
+            # Verificar si la completación pertenece al reservorio
+            completion_reservoir = self.completion_to_reservoir.get(completion)
+            if completion_reservoir != reservoir:
+                continue
+                
+            # Verificar si la completación está activa
+            well_type = self.wells[well_name].well_type
+            if well_type == "INJECTION":
+                if self.injection_data.is_well_active_in_december_2024(completion):
+                    return True
+            else:  # PRODUCTION
+                if self.production_data.is_well_active_in_december_2024(completion):
+                    return True
+        
+        return False
+    
+    # NUEVO: Método para verificar si un pozo tiene completaciones en un reservorio específico
+    def has_completions_in_reservoir(self, well_name: str, reservoir: str) -> bool:
+        """
+        Determina si un pozo tiene completaciones en un reservorio específico.
+        """
+        if well_name not in self.well_to_completions:
+            return False
+            
+        # Obtener completaciones del pozo
+        completions = self.well_to_completions[well_name]
+        
+        # Verificar cada completación
+        for completion in completions:
+            # Verificar si la completación pertenece al reservorio
+            completion_reservoir = self.completion_to_reservoir.get(completion)
+            if completion_reservoir == reservoir:
+                return True
+        
+        return False
+    
+    # NUEVO: Método para obtener el tipo de pozo más relevante para un reservorio específico
+    def get_well_type_for_reservoir(self, well_name: str, reservoir: str) -> str:
+        """
+        Determina el tipo de pozo más relevante para un reservorio específico.
+        Si el pozo tiene completaciones de inyección en el reservorio, se considera inyector.
+        De lo contrario, se considera productor.
+        """
+        if well_name not in self.well_to_completions:
+            return "PRODUCTION"  # Default
+            
+        # Obtener completaciones del pozo
+        completions = self.well_to_completions[well_name]
+        
+        # Variables para seguimiento
+        has_injection = False
+        has_production = False
+        latest_inj_date = None
+        latest_prod_date = None
+        
+        # Verificar cada completación
+        for completion in completions:
+            # Verificar si la completación pertenece al reservorio
+            completion_reservoir = self.completion_to_reservoir.get(completion)
+            if completion_reservoir != reservoir:
+                continue
+                
+            # Verificar datos de inyección
+            inj_date = self.injection_data.get_latest_injection_date(completion)
+            if inj_date is not None:
+                has_injection = True
+                if latest_inj_date is None or inj_date > latest_inj_date:
+                    latest_inj_date = inj_date
+            
+            # Verificar datos de producción
+            prod_date = self.production_data.get_latest_production_date(completion)
+            if prod_date is not None:
+                has_production = True
+                if latest_prod_date is None or prod_date > latest_prod_date:
+                    latest_prod_date = prod_date
+        
+        # Determinar tipo basado en datos
+        if has_injection and not has_production:
+            return "INJECTION"
+        elif has_production and not has_injection:
+            return "PRODUCTION"
+        elif has_injection and has_production:
+            # Si tiene ambos tipos de datos, usar el más reciente
+            if latest_inj_date >= latest_prod_date:
+                return "INJECTION"
+            else:
+                return "PRODUCTION"
+        else:
+            # Sin datos específicos para el reservorio, usar el tipo general del pozo
+            return self.wells[well_name].well_type
+    
     def select_well(self, well_name: str):
         """Select a well by name"""
         if well_name in self.wells:
@@ -458,14 +584,17 @@ class WellDataStore:
         return completions
     
     def get_wells_for_reservoirs(self, reservoirs: Set[str]) -> Set[str]:
-        """Get well names that have completions in any of the specified reservoirs"""
+        """
+        Get well names that have completions in any of the specified reservoirs
+        Mejorado para manejar correctamente pozos con múltiples completaciones
+        """
         wells = set()
         for well_name, completions in self.well_to_completions.items():
             for completion in completions:
                 reservoir = self.completion_to_reservoir.get(completion)
                 if reservoir and reservoir in reservoirs:
                     wells.add(well_name)
-                    break
+                    break  # Una vez que encontramos una completación en el reservorio, no necesitamos seguir buscando
         return wells
     
     def get_completions_for_selected_wells_and_reservoirs(self, reservoirs: Set[str] = None) -> List[str]:

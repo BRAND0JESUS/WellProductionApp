@@ -1,10 +1,11 @@
 from PyQt5.QtWidgets import QWidget, QVBoxLayout, QMenu, QApplication
 from PyQt5.QtCore import pyqtSignal, pyqtSlot, Qt, QPointF, QRectF
-from PyQt5.QtGui import QPainter, QPen, QBrush, QColor, QPolygonF, QPainterPath
+from PyQt5.QtGui import QPainter, QPen, QBrush, QColor, QPainterPath
 
 class WellMapWidget(QWidget):
     """
     Widget for displaying and interacting with well locations on a map.
+    Enhanced to support well visualization by unique well (not by completion).
     """
     # Signal emitted when a well is clicked
     wellClicked = pyqtSignal(str)
@@ -30,6 +31,12 @@ class WellMapWidget(QWidget):
         self.selection_start = None
         self.selection_current = None
         
+        # Add a reference to active reservoirs (set by main_app)
+        self.selected_reservoirs = set()
+        
+        # Track whether "All" reservoirs button is checked
+        self.reservoir_buttons_all_checked = True
+        
         # Well display properties
         self.well_radius = 10
         self.selected_well_radius = 15
@@ -40,7 +47,11 @@ class WellMapWidget(QWidget):
         self.injection_active_color = QColor(0, 0, 200)     # Blue
         self.injection_inactive_color = QColor(0, 0, 200)   # Blue border only
         self.other_well_color = QColor(150, 150, 150)       # Grey
+        self.no_completion_color = QColor(150, 150, 150)    # Grey for wells without completions in the reservoir
         self.selected_color = QColor(200, 0, 0)             # Red
+        
+        # Dictionary to store reservoir status for each well
+        self.well_reservoir_status = {}  # Format: {well_name: {reservoir: {'has_completion': bool, 'active': bool, 'type': str}}}
         
         # Enable mouse tracking
         self.setMouseTracking(True)
@@ -67,6 +78,28 @@ class WellMapWidget(QWidget):
             'active': active  # Add active state property
         }
         self.update_map_bounds()
+        self.update()
+    
+    def update_well_reservoir_status(self, well_name, reservoir, has_completion, active, well_type="PRODUCTION"):
+        """
+        Update well completion status for a specific reservoir
+        Modified to include well_type for reservoir-specific well type
+        """
+        if well_name not in self.well_reservoir_status:
+            self.well_reservoir_status[well_name] = {}
+            
+        if reservoir not in self.well_reservoir_status[well_name]:
+            self.well_reservoir_status[well_name][reservoir] = {}
+            
+        self.well_reservoir_status[well_name][reservoir] = {
+            'has_completion': has_completion,
+            'active': active,
+            'type': well_type
+        }
+    
+    def set_selected_reservoirs(self, reservoir_set):
+        """Set the currently selected reservoirs for special rendering"""
+        self.selected_reservoirs = reservoir_set
         self.update()
     
     def set_well_activity(self, well_name, active):
@@ -203,60 +236,6 @@ class WellMapWidget(QWidget):
         
         return mx, my
     
-    def draw_injection_well(self, painter, x, y, radius, is_active=True, is_selected=False):
-        """Draw an injection well as a circle with arrow going through it"""
-        # Save painter state
-        painter.save()
-        
-        # Set colors based on selection and activity state
-        if is_selected:
-            pen_color = self.selected_color.darker()
-            brush_color = self.selected_color if is_active else QColor(0, 0, 0, 0)
-        else:
-            pen_color = self.injection_active_color.darker()
-            brush_color = self.injection_active_color if is_active else QColor(0, 0, 0, 0)
-        
-        # Draw circle
-        painter.setPen(QPen(pen_color, 2))
-        painter.setBrush(QBrush(brush_color))
-        painter.drawEllipse(QPointF(x, y), radius, radius)
-        
-        # Draw arrow going through the circle
-        # Calculate arrow size based on radius
-        arrow_length = radius * 2.5
-        arrow_head_size = radius * 0.6
-        
-        # Set arrow pen 
-        pen_width = 2.5 if is_selected else 2.0
-        painter.setPen(QPen(pen_color, pen_width))
-        
-        # Starting and ending points for the arrow line
-        start_x = x + arrow_length/2
-        start_y = y - arrow_length/2
-        end_x = x - arrow_length/2
-        end_y = y + arrow_length/2
-        
-        # Draw the main arrow line
-        painter.drawLine(QPointF(start_x, start_y), QPointF(end_x, end_y))
-        
-        # Draw the arrowhead at the end
-        arrow_points = QPolygonF()
-        arrow_points.append(QPointF(end_x, end_y))
-        arrow_points.append(QPointF(end_x + arrow_head_size, end_y - arrow_head_size/2))
-        arrow_points.append(QPointF(end_x + arrow_head_size/2, end_y - arrow_head_size))
-        
-        # Create a path for the arrowhead
-        path = QPainterPath()
-        path.addPolygon(arrow_points)
-        path.closeSubpath()
-        
-        # Fill the arrowhead
-        painter.setBrush(QBrush(pen_color))
-        painter.drawPath(path)
-        
-        # Restore painter state
-        painter.restore()
-    
     def paintEvent(self, event):
         """Draw the map and wells"""
         painter = QPainter(self)
@@ -272,41 +251,123 @@ class WellMapWidget(QWidget):
                 continue
                 
             x, y = self.transform_point(well_data['x'], well_data['y'])
-            radius = self.selected_well_radius if well_data['selected'] else self.well_radius
+            well_type = well_data['type']
             
-            if well_data['type'] == 'INJECTION':
-                # Draw injector using the specialized function
-                self.draw_injection_well(
-                    painter, 
-                    x, 
-                    y, 
-                    radius, 
-                    is_active=well_data['active'],
-                    is_selected=well_data['selected']
-                )
-            else:
-                # Draw production well (original style)
-                if well_data['selected']:
-                    # Use select color for selected wells
-                    pen_color = self.selected_color.darker()
-                    brush_color = self.selected_color
-                    pen_width = 2
-                else:
-                    pen_width = 2
-                    well_type = well_data['type']
-                    
-                    # Default to production well style
-                    pen_color = self.production_active_color.darker()
-                    if well_data['active']:
-                        brush_color = self.production_active_color
-                    else:
-                        brush_color = QColor(0, 0, 0, 0)  # Transparent fill
-                        
-                # Draw well point
+            # Handle well rendering based on selection and reservoir status
+            if well_data['selected']:
+                # Selected wells always use selected color
+                pen_color = self.selected_color.darker()
+                brush_color = self.selected_color
+                radius = self.selected_well_radius
+                pen_width = 2
+                
+                # Draw the selected well
                 painter.setPen(QPen(pen_color, pen_width))
                 painter.setBrush(QBrush(brush_color))
                 painter.drawEllipse(QPointF(x, y), radius, radius)
-            
+                
+            else:
+                radius = self.well_radius
+                pen_width = 2
+                
+                # Check if we are filtering by reservoirs
+                if self.selected_reservoirs and not self.reservoir_buttons_all_checked:
+                    # We're filtering by specific reservoirs
+                    has_completion_in_selected = False
+                    is_active_in_selected = False
+                    well_type_in_reservoir = "PRODUCTION"  # Default
+                    
+                    # Check if well has completions in any selected reservoir
+                    for reservoir in self.selected_reservoirs:
+                        if (well_name in self.well_reservoir_status and 
+                            reservoir in self.well_reservoir_status[well_name]):
+                            
+                            status = self.well_reservoir_status[well_name][reservoir]
+                            if status['has_completion']:
+                                has_completion_in_selected = True
+                                if status['active']:
+                                    is_active_in_selected = True
+                                    well_type_in_reservoir = status['type']
+                                    break  # Found active completion, no need to check more
+                    
+                    # Set colors based on completion status in selected reservoirs
+                    if has_completion_in_selected:
+                        if well_type_in_reservoir == 'PRODUCTION':
+                            pen_color = self.production_active_color.darker()
+                            if is_active_in_selected:
+                                brush_color = self.production_active_color
+                            else:
+                                brush_color = QColor(0, 0, 0, 0)  # Transparent
+                        else:  # INJECTION
+                            pen_color = self.injection_active_color.darker()
+                            if is_active_in_selected:
+                                brush_color = self.injection_active_color
+                            else:
+                                brush_color = QColor(0, 0, 0, 0)  # Transparent
+                    else:
+                        # No completions in selected reservoirs - grey outline and transparent fill
+                        pen_color = self.no_completion_color
+                        brush_color = QColor(0, 0, 0, 0)  # Transparent
+                        
+                else:
+                    # Not filtering by reservoir or showing all reservoirs
+                    # Use the default well coloring based on type and activity
+                    if well_type == 'PRODUCTION':
+                        pen_color = self.production_active_color.darker()
+                        if well_data['active']:
+                            brush_color = self.production_active_color
+                        else:
+                            brush_color = QColor(0, 0, 0, 0)  # Transparent
+                    elif well_type == 'INJECTION':
+                        pen_color = self.injection_active_color.darker()
+                        if well_data['active']:
+                            brush_color = self.injection_active_color
+                        else:
+                            brush_color = QColor(0, 0, 0, 0)  # Transparent
+                    else:
+                        pen_color = self.other_well_color.darker()
+                        brush_color = self.other_well_color
+                
+                # Draw different icons based on well type
+                if well_type == 'INJECTION':
+                    # Draw circle for injection well
+                    painter.setPen(QPen(pen_color, pen_width))
+                    painter.setBrush(QBrush(brush_color))
+                    painter.drawEllipse(QPointF(x, y), radius, radius)
+                    
+                    # Draw diagonal arrow through the circle
+                    arrow_length = radius * 2.0
+                    arrow_head_size = radius * 0.6
+                    
+                    # Calculate points for the diagonal main line (45 degree angle)
+                    angle = 3.14159 / 4  # 45 degrees
+                    
+                    start_x = x - arrow_length * 0.707  # cos(45°) ≈ 0.707
+                    start_y = y - arrow_length * 0.707  # sin(45°) ≈ 0.707
+                    end_x = x + arrow_length * 0.707
+                    end_y = y + arrow_length * 0.707
+                    
+                    # Draw the diagonal main line
+                    arrow_pen = QPen(pen_color, pen_width * 1.5)  # Thicker line for the arrow
+                    painter.setPen(arrow_pen)
+                    painter.drawLine(QPointF(start_x, start_y), QPointF(end_x, end_y))
+                    
+                    # Calculate arrowhead points
+                    p1_x = end_x - arrow_head_size * 0.707
+                    p1_y = end_y
+                    p2_x = end_x
+                    p2_y = end_y - arrow_head_size * 0.707
+                    
+                    # Draw arrowhead lines
+                    painter.drawLine(QPointF(end_x, end_y), QPointF(p1_x, p1_y))
+                    painter.drawLine(QPointF(end_x, end_y), QPointF(p2_x, p2_y))
+                    
+                else:  # PRODUCTION
+                    # Standard drawing for production wells
+                    painter.setPen(QPen(pen_color, pen_width))
+                    painter.setBrush(QBrush(brush_color))
+                    painter.drawEllipse(QPointF(x, y), radius, radius)
+                
             # Draw well name
             painter.setPen(QPen(Qt.black, 1))
             painter.drawText(int(x + radius + 2), int(y + 5), well_name)
@@ -322,9 +383,11 @@ class WellMapWidget(QWidget):
             selection_rect = QRectF(min(x1, x2), min(y1, y2), abs(x2-x1), abs(y2-y1))
             painter.drawRect(selection_rect)
     
-    def draw_compass(self, painter):
-        """Draw a simple north arrow compass in the top-right corner"""
-        pass
+    # Tracking state of the "All" reservoir button
+    def set_all_reservoirs_button_state(self, checked):
+        """Track the state of the 'All' reservoirs button"""
+        self.reservoir_buttons_all_checked = checked
+        self.update()
     
     def mousePressEvent(self, event):
         """Handle mouse press events"""

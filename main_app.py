@@ -2,14 +2,76 @@ import sys
 import os
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QLabel, QPushButton, QLineEdit, 
-                             QSplitter, QMessageBox, QStatusBar, QCheckBox)
-from PyQt5.QtCore import Qt, QSize
+                             QSplitter, QMessageBox, QStatusBar, QCheckBox,
+                             QMenu, QAction, QDialog, QMenuBar)
+from PyQt5.QtCore import Qt, QSize, QThread, pyqtSignal
+import json
+import pandas as pd
+from datetime import datetime
 
 from database_manager import DatabaseManager
 from models import Well, WellDataStore
 from map_widget import WellMapWidget
 from chart_widgets import ProductionProfileChart, InjectionProfileChart
 
+# Importaciones para operaciones
+from operations_database import OperationsDatabase
+from well_type_calculator import WellTypeCalculator
+from operation_dialogs import (OperationProgressDialog, OperationResultsDialog, 
+                             WellTypeOperationDialog, OperationListDialog)
+
+
+# Clase para realizar operaciones en segundo plano
+class OperationWorker(QThread):
+    """Worker thread to perform operations in the background"""
+    
+    # Signals
+    progress_updated = pyqtSignal(int, str)
+    operation_completed = pyqtSignal(bool, object)
+    
+    def __init__(self, operation_type, data_store, options=None):
+        super().__init__()
+        self.operation_type = operation_type
+        self.data_store = data_store
+        self.options = options or {}
+        self.results = None
+        self.error = None
+        self.calculator = None
+    
+    def run(self):
+        """Run the operation"""
+        try:
+            # Initialize well type calculator
+            self.progress_updated.emit(10, "Initializing well type calculator...")
+            self.calculator = WellTypeCalculator(self.data_store)
+            
+            # All operations are now well_monthly_type only
+            self.calculate_well_monthly_types()
+                
+            # Operation completed successfully
+            self.operation_completed.emit(True, self.results)
+            
+        except Exception as e:
+            # Operation failed
+            import traceback
+            self.error = f"{str(e)}\n{traceback.format_exc()}"
+            self.progress_updated.emit(0, f"Error: {str(e)}")
+            self.operation_completed.emit(False, self.error)
+    
+    def calculate_well_monthly_types(self):
+        """Calculate well types by month"""
+        self.progress_updated.emit(20, "Calculating monthly well types...")
+        
+        try:
+            monthly_types = self.calculator.calculate_monthly_well_types()
+            self.progress_updated.emit(90, f"Successfully processed {len(monthly_types)} monthly well records...")
+            
+            self.results = {
+                'monthly_types': monthly_types
+            }
+        except Exception as e:
+            self.progress_updated.emit(20, f"Error calculating monthly well types: {str(e)}")
+            raise
 
 class WellProductionApp(QMainWindow):
     """Main application window for Well Production App"""
@@ -21,11 +83,20 @@ class WellProductionApp(QMainWindow):
         self.db_manager = DatabaseManager()
         self.data_store = WellDataStore()
         
+        # Initialize operations database
+        self.operations_db = OperationsDatabase()
+        
         # Set up UI
         self.setup_ui()
         
+        # Set up menu
+        self.setup_menu()
+        
         # Connect to database and load data
         self.load_data()
+        
+        # Connect to operations database
+        self.init_operations_db()
         
         # Set window title and size
         self.setWindowTitle("WellProductionApp")
@@ -48,7 +119,7 @@ class WellProductionApp(QMainWindow):
         self.reservoir_buttons_layout.setSpacing(5)
         
         # Add label for reservoir selection
-        reservoir_label = QLabel("Reservorio:")
+        reservoir_label = QLabel("Rerervoir:")
         reservoir_label.setStyleSheet("font-weight: bold;")
         self.reservoir_buttons_layout.addWidget(reservoir_label)
         
@@ -137,12 +208,51 @@ class WellProductionApp(QMainWindow):
         self.main_layout.addLayout(button_layout)
         self.main_layout.addWidget(selection_help)
     
+    def setup_menu(self):
+        """Set up the application menu bar"""
+        # Create menu bar
+        menubar = self.menuBar()
+        
+        # Create menus
+        file_menu = menubar.addMenu("&File")
+        operations_menu = menubar.addMenu("&Operations")
+        help_menu = menubar.addMenu("&Help")
+        
+        # File menu actions
+        exit_action = QAction("E&xit", self)
+        exit_action.setShortcut("Ctrl+Q")
+        exit_action.setStatusTip("Exit the application")
+        exit_action.triggered.connect(self.close)
+        file_menu.addAction(exit_action)
+        
+        # Operations menu actions
+        well_type_action = QAction("Calculate &Well Types", self)
+        well_type_action.setStatusTip("Calculate well types (producer/injector) over time")
+        well_type_action.triggered.connect(self.run_well_type_operation)
+        operations_menu.addAction(well_type_action)
+        
+        operations_menu.addSeparator()
+        
+        view_operations_action = QAction("View Previous &Operations", self)
+        view_operations_action.setStatusTip("View and manage previous operations")
+        view_operations_action.triggered.connect(self.view_operations)
+        operations_menu.addAction(view_operations_action)
+        
+        # Help menu actions
+        about_action = QAction("&About", self)
+        about_action.setStatusTip("Show information about the application")
+        about_action.triggered.connect(self.show_about)
+        help_menu.addAction(about_action)
+    
     def load_data(self):
-        """Connect to database and load well data"""
+        """
+        Connect to database and load well data
+        Modified to ensure only one point per well is added to the map
+        """
         # Connect to database
         if not self.db_manager.connect():
             QMessageBox.critical(self, "Database Error", 
-                               "Failed to connect to the database. Please check the database file location.")
+                            "Failed to connect to the database. Please check the database file location.")
             return
         
         # Load well locations
@@ -162,11 +272,15 @@ class WellProductionApp(QMainWindow):
         self.data_store.load_production_data(prod_df)
         self.data_store.load_injection_data(inj_df)
         
-        # Add wells to map - using the dynamically determined well type
+        # Add wells to map - one per well name, not per completion
+        # Modified to ensure only one point per well is added to the map
         for well_name, well in self.data_store.wells.items():
             # Add well with proper type and active status
             self.map_widget.add_well(well_name, well.x_coordinate, well.y_coordinate, 
-                                     well.well_type, well.active)
+                                well.well_type, well.active)
+        
+        # Update well reservoir status for display in map
+        self.update_well_reservoir_statuses()
         
         # Create reservoir buttons
         self.create_reservoir_buttons()
@@ -180,7 +294,8 @@ class WellProductionApp(QMainWindow):
         inactive_wells = well_count - active_wells
         
         # Count injector wells vs producer wells
-        inj_wells = sum(1 for well in self.data_store.wells.values() if well.well_type == "INJECTION")
+        inj_wells = sum(1 for well in self.data_store.wells.values() 
+                    if well.well_type == "INJECTION")
         prod_wells = well_count - inj_wells
         
         self.status_bar.showMessage(
@@ -188,6 +303,52 @@ class WellProductionApp(QMainWindow):
             f"({active_wells} active, {inactive_wells} inactive), " +
             f"({prod_wells} producers, {inj_wells} injectors) as of Dec 2024"
         )
+    
+    def init_operations_db(self):
+        """Initialize the operations database"""
+        self.operations_db = OperationsDatabase()
+        if not self.operations_db.connect():
+            QMessageBox.warning(self, "Database Warning", 
+                              "Failed to connect to the operations database. "
+                              "Some features may not be available.")
+
+    def update_well_reservoir_statuses(self):
+        """
+        Process well completion and activity data by reservoir
+        Modified to update well status by reservoir for a single well point
+        """
+        # Initialize data for all wells and their reservoirs
+        for well_name in self.data_store.wells:
+            # Get all completions for this well
+            if well_name in self.data_store.well_to_completions:
+                completions = self.data_store.well_to_completions[well_name]
+                
+                # For each completion, check which reservoir it belongs to
+                for completion in completions:
+                    reservoir = self.data_store.completion_to_reservoir.get(completion)
+                    
+                    if reservoir:
+                        # Determine activity status based on well type and data
+                        is_production = self.data_store.wells[well_name].well_type == "PRODUCTION"
+                        
+                        if is_production:
+                            # For production wells, check activity in this completion
+                            is_active = self.data_store.production_data.is_well_active_in_december_2024(completion)
+                            well_type = "PRODUCTION"
+                        else:
+                            # For injection wells, check activity in this completion
+                            is_active = self.data_store.injection_data.is_well_active_in_december_2024(completion)
+                            well_type = "INJECTION"
+                        
+                        # Update the map widget's tracking of well-reservoir status
+                        # Including the well_type for this completion
+                        self.map_widget.update_well_reservoir_status(
+                            well_name=well_name,
+                            reservoir=reservoir,
+                            has_completion=True,
+                            active=is_active,
+                            well_type=well_type
+                        )
     
     def create_reservoir_buttons(self):
         """Create buttons for each unique reservoir"""
@@ -200,7 +361,7 @@ class WellProductionApp(QMainWindow):
                 reservoirs.add(reservoir)
         
         # Add 'All' button first
-        all_button = QPushButton("Todos")
+        all_button = QPushButton("All")
         all_button.setCheckable(True)
         all_button.setChecked(True)
         all_button.clicked.connect(self.toggle_all_reservoirs)
@@ -242,6 +403,10 @@ class WellProductionApp(QMainWindow):
         
         # Clear current well selection when reservoir filter changes
         self.clear_selection()
+        
+        # Update map widget with selected reservoirs for coloring
+        self.map_widget.set_selected_reservoirs(self.selected_reservoirs)
+        self.map_widget.set_all_reservoirs_button_state(self.reservoir_buttons['all'].isChecked())
     
     def toggle_all_reservoirs(self, checked):
         """Handle clicking the 'All' button"""
@@ -266,6 +431,10 @@ class WellProductionApp(QMainWindow):
         # Update well visibility
         self.update_well_visibility()
         
+        # Update map widget with selected reservoirs for coloring
+        self.map_widget.set_selected_reservoirs(self.selected_reservoirs)
+        self.map_widget.set_all_reservoirs_button_state(self.reservoir_buttons['all'].isChecked())
+        
         # Update status
         well_count = len(self.data_store.wells)
         prod_wells = sum(1 for well in self.data_store.wells.values() 
@@ -274,48 +443,48 @@ class WellProductionApp(QMainWindow):
         self.status_bar.showMessage(f"Showing all {well_count} wells ({prod_wells} producers, {inj_wells} injectors)")
     
     def update_well_visibility(self):
-        """Update visibility of wells based on selected reservoirs"""
-        # If "All" is checked, show all wells
+        """
+        Update visibility of wells based on selected reservoirs
+        """
+        # If "All" is selected, show all wells
         if self.reservoir_buttons['all'].isChecked():
             for well_name in self.data_store.wells:
                 self.map_widget.set_well_visibility(well_name, True)
             return
         
-        # If no reservoirs selected, don't hide any wells
+        # If no reservoirs are selected, don't hide any wells
         if not self.selected_reservoirs:
             for well_name in self.data_store.wells:
                 self.map_widget.set_well_visibility(well_name, True)
             return
         
-        # Get wells that have completions in any of the selected reservoirs
-        visible_wells = self.data_store.get_wells_for_reservoirs(self.selected_reservoirs)
-        
-        # Show wells from selected reservoirs, hide others
+        # Keep all wells visible, regardless of selected reservoirs
         for well_name in self.data_store.wells:
-            if well_name in visible_wells:
-                self.map_widget.set_well_visibility(well_name, True)
-            else:
-                self.map_widget.set_well_visibility(well_name, False)
+            self.map_widget.set_well_visibility(well_name, True)
+        
+        # Get wells that have completions in the selected reservoirs
+        # to count them and display statistics in the status bar
+        wells_with_completions = self.data_store.get_wells_for_reservoirs(self.selected_reservoirs)
         
         # Update the map
         self.map_widget.update()
         
-        # Count producers and injectors in visible wells
-        prod_count = sum(1 for well_name in visible_wells 
-                        if self.data_store.wells[well_name].well_type == "PRODUCTION")
-        inj_count = len(visible_wells) - prod_count
+        # Count producers and injectors in wells with completions in the selected reservoirs
+        prod_count = sum(1 for well_name in wells_with_completions 
+                       if self.data_store.wells[well_name].well_type == "PRODUCTION")
+        inj_count = len(wells_with_completions) - prod_count
         
-        # Update status bar
+        # Update status bar        
         if len(self.selected_reservoirs) == 1:
             reservoir = next(iter(self.selected_reservoirs))
             self.status_bar.showMessage(
-                f"Showing {len(visible_wells)} wells in reservoir {reservoir} " +
+                f"Showing all wells. {len(wells_with_completions)} wells have completions in reservoir {reservoir} " +
                 f"({prod_count} producers, {inj_count} injectors)"
             )
         else:
             reservoirs_str = ", ".join(sorted(self.selected_reservoirs))
             self.status_bar.showMessage(
-                f"Showing {len(visible_wells)} wells in reservoirs: {reservoirs_str} " +
+                f"Showing all wells. {len(wells_with_completions)} wells have completions in reservoirs: {reservoirs_str} " +
                 f"({prod_count} producers, {inj_count} injectors)"
             )
     
@@ -334,6 +503,10 @@ class WellProductionApp(QMainWindow):
         # Show all wells
         for well_name in self.data_store.wells:
             self.map_widget.set_well_visibility(well_name, True)
+        
+        # Update map widget selected reservoirs
+        self.map_widget.set_selected_reservoirs(set())
+        self.map_widget.set_all_reservoirs_button_state(True)
         
         # Update map
         self.map_widget.update()
@@ -384,7 +557,6 @@ class WellProductionApp(QMainWindow):
         self.update_charts()
     
     def update_charts(self):
-        """Update charts with current selection, filtered by selected reservoirs"""
         # Get selected well names for title
         selected_wells = self.data_store.get_selected_wells()
         well_names = [well.well_name for well in selected_wells]
@@ -401,13 +573,26 @@ class WellProductionApp(QMainWindow):
             if len(reservoirs_filter) == 1:
                 reservoir_name = next(iter(reservoirs_filter))
                 if len(selected_wells) == 1:
-                    well_title = f"{well_names[0]} ({reservoir_name})"
+                    # For a single well, also show its completions for that reservoir
+                    well = selected_wells[0]
+                    completations = []
+                    for comp in self.data_store.well_to_completions.get(well.well_name, []):
+                        comp_reservoir = self.data_store.completion_to_reservoir.get(comp)
+                        if comp_reservoir == reservoir_name:
+                            completations.append(comp)
+                    
+                    if completations:
+                        well_title = f"{well.well_name} [{', '.join(completations)}] ({reservoir_name})"
+                    else:
+                        well_title = f"{well.well_name} ({reservoir_name})"
                 else:
                     well_title = f"{len(selected_wells)} Wells ({reservoir_name})"
             else:
                 reservoirs_str = ", ".join(sorted(reservoirs_filter))
                 if len(selected_wells) == 1:
-                    well_title = f"{well_names[0]} ({reservoirs_str})"
+                    well = selected_wells[0]
+                    # For multiple reservoirs, show the well and its reservoirs
+                    well_title = f"{well.well_name} ({reservoirs_str})"
                 else:
                     well_title = f"{len(selected_wells)} Wells ({reservoirs_str})"
             
@@ -428,11 +613,22 @@ class WellProductionApp(QMainWindow):
                 # Show proper well type description
                 well_type_display = "Producer" if well.well_type == "PRODUCTION" else "Injector"
                 
-                if reservoirs_filter:
-                    reservoirs_str = ", ".join(sorted(reservoirs_filter))
-                    status += f" ({well_type_display}, {active_status}, Arenas: {reservoirs_str})"
-                elif well.reservoir:
-                    status += f" ({well_type_display}, {active_status}, {well.reservoir})"
+                # Show completions and reservoirs information
+                completations = self.data_store.well_to_completions.get(well.well_name, [])
+                if completations:
+                    # Get reservoirs for completions
+                    compl_reservoirs = []
+                    for comp in completations:
+                        reservoir = self.data_store.completion_to_reservoir.get(comp)
+                        if reservoir:
+                            compl_reservoirs.append(f"{comp} ({reservoir})")
+                        else:
+                            compl_reservoirs.append(comp)
+                    
+                    if compl_reservoirs:
+                        status += f" ({well_type_display}, {active_status}, Completaciones: {', '.join(compl_reservoirs)})"
+                    else:
+                        status += f" ({well_type_display}, {active_status})"
                 else:
                     status += f" ({well_type_display}, {active_status})"
             else:
@@ -476,22 +672,27 @@ class WellProductionApp(QMainWindow):
                 f"{prod_wells} producers, {inj_wells} injectors)"
             )
         elif self.selected_reservoirs:
-            visible_wells = self.data_store.get_wells_for_reservoirs(self.selected_reservoirs)
-            # Count active/inactive wells in the filter
-            active_wells = sum(1 for well_name in visible_wells if self.data_store.wells[well_name].active)
-            inactive_wells = len(visible_wells) - active_wells
+            # Get wells that have completions in the selected reservoirs
+            wells_with_completions = self.data_store.get_wells_for_reservoirs(self.selected_reservoirs)
+            
+            # Count active/inactive wells with completions
+            active_wells = sum(1 for well_name in wells_with_completions if self.data_store.wells[well_name].active)
+            inactive_wells = len(wells_with_completions) - active_wells
             
             # Count producers and injectors
-            prod_wells = sum(1 for well_name in visible_wells 
-                            if self.data_store.wells[well_name].well_type == "PRODUCTION")
-            inj_wells = len(visible_wells) - prod_wells
+            prod_wells = sum(1 for well_name in wells_with_completions 
+                        if self.data_store.wells[well_name].well_type == "PRODUCTION")
+            inj_wells = len(wells_with_completions) - prod_wells
+            
+            # Count total wells (now we show all)
+            total_wells = len(self.data_store.wells)
             
             reservoirs_str = ", ".join(sorted(self.selected_reservoirs))
             self.status_bar.showMessage(
-                f"Showing {len(visible_wells)} wells " +
+                f"Showing all {total_wells} wells. " +
+                f"{len(wells_with_completions)} wells have completions in reservoirs: {reservoirs_str} " +
                 f"({active_wells} active, {inactive_wells} inactive, " +
-                f"{prod_wells} producers, {inj_wells} injectors) " +
-                f"in reservoirs: {reservoirs_str}"
+                f"{prod_wells} producers, {inj_wells} injectors)"
             )
         else:
             self.status_bar.showMessage("Selection cleared")
@@ -527,6 +728,7 @@ class WellProductionApp(QMainWindow):
             f"({active_count} active, {inactive_count} inactive, " +
             f"{prod_count} producers, {inj_count} injectors)"
         )
+
     
     def toggle_multi_selection_mode(self, state):
         """Toggle between single and multi-selection modes"""
@@ -593,6 +795,250 @@ class WellProductionApp(QMainWindow):
             self.clear_selection()
         
         super().keyPressEvent(event)
+    
+    # Métodos para las operaciones
+    def run_well_type_operation(self):
+        """Run the well type calculation operation - simplified to only calculate at well level"""
+        dialog = WellTypeOperationDialog(self)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+        
+        # Get options from dialog
+        options = dialog.get_options()
+        
+        # Always use well_monthly_type operation type now
+        operation_type = "well_monthly_type"
+        
+        # Check if operation already exists
+        if self.operations_db.operation_exists(operation_type):
+            result = QMessageBox.question(
+                self,
+                "Operation Exists",
+                f"A previous '{operation_type}' operation already exists. "
+                f"Would you like to run it again?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            if result != QMessageBox.Yes:
+                return
+        
+        # Create progress dialog
+        progress_dialog = OperationProgressDialog(
+            self,
+            title="Calculating Well Types",
+            description="Calculating well types for all wells using the high-performance method"
+        )
+        
+        # Create worker thread
+        worker = OperationWorker(operation_type, self.data_store, options)
+        
+        # Connect signals
+        worker.progress_updated.connect(progress_dialog.update_progress)
+        worker.operation_completed.connect(lambda success, result: self.on_operation_completed(
+            success, result, operation_type, progress_dialog, options
+        ))
+        
+        # Start worker and show dialog
+        worker.start()
+        progress_dialog.exec_()
+        
+        # If dialog was rejected (Cancel button), terminate worker
+        if not progress_dialog.result():
+            worker.terminate()
+            worker.wait()
+    
+    def on_operation_completed(self, success, result, operation_type, progress_dialog, options):
+        """Handle operation completion"""
+        if success:
+            # Update progress dialog
+            progress_dialog.operation_complete()
+            
+            # Save results to database
+            save_success = self.save_operation_results(operation_type, result, options)
+            
+            # Show appropriate message
+            if save_success:
+                # Gather statistics for display
+                stats_message = ""
+                if 'monthly_types' in result:
+                    monthly_count = len(result['monthly_types'])
+                    well_count = result['monthly_types']['well_name'].nunique()
+                    stats_message = f"\n\nProcessed {well_count} wells with {monthly_count} monthly records."
+                
+                QMessageBox.information(
+                    self,
+                    "Operation Completed",
+                    f"The {operation_type} operation completed successfully.{stats_message}"
+                )
+            else:
+                QMessageBox.warning(
+                    self,
+                    "Operation Partially Completed",
+                    f"The {operation_type} calculation completed, but there was a problem saving all results to the database."
+                )
+        else:
+            # If there's a traceback, show it in a detailed error message
+            error_message = str(result)
+            if '\n' in error_message:
+                short_error = error_message.split('\n')[0]
+            else:
+                short_error = error_message
+                
+            # Update progress dialog with error
+            progress_dialog.operation_failed(short_error)
+            
+            # Show detailed error message
+            QMessageBox.critical(
+                self,
+                "Operation Failed",
+                f"The {operation_type} operation failed:\n\n{short_error}\n\nSee the application log for more details."
+            )
+            
+            # Print full error to console for debugging
+            print(f"Operation error details:\n{error_message}")
+    
+    def save_operation_results(self, operation_type, results, options):
+        """Save operation results to database, overwriting any previous operation of the same type"""
+        try:
+            # Create operation entry
+            description = "Operation to classify wells by type"
+            parameters_json = json.dumps(options)
+            
+            # The create_operation method now deletes the previous operation if it exists
+            operation_id = self.operations_db.create_operation(
+                operation_name=operation_type,
+                description=description,
+                parameters=parameters_json
+            )
+            
+            if not operation_id:
+                QMessageBox.warning(
+                    self,
+                    "Database Warning",
+                    f"Could not create operation record. Results were not saved."
+                )
+                return False
+            
+            # Save data - now simplified to only deal with well_monthly_type
+            if 'monthly_types' in results and not results['monthly_types'].empty:
+                success = self.operations_db.save_well_monthly_type(operation_id, results['monthly_types'])
+                if not success:
+                    QMessageBox.warning(
+                        self,
+                        "Database Warning",
+                        f"Error saving monthly well type results."
+                    )
+                    return False
+            else:
+                QMessageBox.warning(
+                    self,
+                    "No Data",
+                    f"No monthly well type results were generated."
+                )
+                return False
+            
+            return True
+                
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "Error in Saving Results",
+                f"An error occurred while saving the operation results: {str(e)}"
+            )
+            return False
+
+    def view_operations(self):
+        """View and manage previous operations"""
+        # Get list of operations
+        operations_df = self.operations_db.get_operations()
+        
+        if operations_df.empty:
+            QMessageBox.information(
+                self,
+                "No Operations",
+                "No previous operations found."
+            )
+            return
+        
+        # Show operations list dialog
+        dialog = OperationListDialog(self, operations_df)
+        result = dialog.exec_()
+        
+        # Handle dialog result
+        operation = dialog.get_selected_operation()
+        if operation and result == 1:  # View operation
+            self.view_operation_results(operation)
+        elif operation and result == 2:  # Delete operation
+            self.delete_operation(operation)
+
+    def view_operation_results(self, operation):
+        """View the results of an operation"""
+        operation_id = operation['operation_id']
+        operation_name = operation['operation_name']
+        
+        # Get data - simplified to just retrieve monthly type data
+        monthly_df = self.operations_db.get_well_monthly_type(operation_id)
+        self.show_monthly_type_results(monthly_df, operation)
+
+    def show_monthly_type_results(self, monthly_df, operation):
+        """Show results of monthly well type operation"""
+        if monthly_df.empty:
+            QMessageBox.warning(
+                self,
+                "No Data",
+                "No data found for this operation."
+            )
+            return
+        
+        # Create results dialog
+        dialog = OperationResultsDialog(
+            self,
+            title=f"Well Monthly Type Results - {operation['creation_date']}",
+            description="Monthly well type classification by well"
+        )
+        
+        # Add statistics to results list
+        well_count = monthly_df['well_name'].nunique()
+        month_count = monthly_df[['year', 'month']].drop_duplicates().shape[0]
+        producer_months = monthly_df[monthly_df['well_type'] == 'PRODUCTION'].shape[0]
+        injector_months = monthly_df[monthly_df['well_type'] == 'INJECTION'].shape[0]
+        
+        dialog.add_result_item(f"Total wells: {well_count}")
+        dialog.add_result_item(f"Total months: {month_count}")
+        dialog.add_result_item(f"Producer well-months: {producer_months}")
+        dialog.add_result_item(f"Injector well-months: {injector_months}")
+        
+        # Show dialog
+        dialog.exec_()
+
+    def delete_operation(self, operation):
+        """Delete an operation and its data"""
+        operation_id = operation['operation_id']
+        success = self.operations_db.delete_operation(operation_id)
+        
+        if success:
+            QMessageBox.information(
+                self,
+                "Operation Deleted",
+                f"Operation '{operation['operation_name']}' deleted successfully."
+            )
+        else:
+            QMessageBox.critical(
+                self,
+                "Delete Failed",
+                f"Failed to delete operation '{operation['operation_name']}'."
+            )
+
+    def show_about(self):
+        """Show information about the application"""
+        QMessageBox.about(
+            self,
+            "About Well Production App",
+            "<h1>Well Production App</h1>"
+            "<p>Version 1.1.0</p>"
+            "<p>An application for visualizing and analyzing well production data.</p>"
+            "<p>© 2025 Energy Company</p>"
+        )
 
 
 def main():
@@ -604,3 +1050,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+            
