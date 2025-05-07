@@ -14,14 +14,15 @@ from models import Well, WellDataStore
 from map_widget import WellMapWidget
 from chart_widgets import ProductionProfileChart, InjectionProfileChart
 
-# Importaciones para operaciones
+# Import custom modules
 from operations_database import OperationsDatabase
 from well_type_calculator import WellTypeCalculator
 from operation_dialogs import (OperationProgressDialog, OperationResultsDialog, 
-                             WellTypeOperationDialog, OperationListDialog)
+                             WellTypeOperationDialog, OperationListDialog,
+                             CompletionStateOperationDialog, CompletionStateResultsDialog)
 
 
-# Clase para realizar operaciones en segundo plano
+# Class to handle operations in the background
 class OperationWorker(QThread):
     """Worker thread to perform operations in the background"""
     
@@ -38,26 +39,84 @@ class OperationWorker(QThread):
         self.error = None
         self.calculator = None
     
-    def run(self):
-        """Run the operation"""
-        try:
-            # Initialize well type calculator
-            self.progress_updated.emit(10, "Initializing well type calculator...")
-            self.calculator = WellTypeCalculator(self.data_store)
-            
-            # All operations are now well_monthly_type only
+
+def run(self):
+    """Run the operation"""
+    try:
+        # Initialize well type calculator
+        self.progress_updated.emit(10, "Initializing well type calculator...")
+        self.calculator = WellTypeCalculator(self.data_store)
+        
+        # Run operation based on type
+        if self.operation_type == "well_monthly_type":
             self.calculate_well_monthly_types()
-                
-            # Operation completed successfully
-            self.operation_completed.emit(True, self.results)
+        elif self.operation_type == "completion_state":
+            self.calculate_completion_states()
+        else:
+            raise ValueError(f"Unknown operation type: {self.operation_type}")
             
+        # Operation completed successfully
+        self.operation_completed.emit(True, self.results)
+        
+    except Exception as e:
+        # Operation failed
+        import traceback
+        self.error = f"{str(e)}\n{traceback.format_exc()}"
+        self.progress_updated.emit(0, f"Error: {str(e)}")
+        self.operation_completed.emit(False, self.error)
+
+    def calculate_completion_states(self):
+        """Calculate completion states by reservoir with improved error handling"""
+        try:
+            self.progress_updated.emit(20, "Starting completion state calculation...")
+            
+            # Calculate completion states with progress updates forwarded
+            # Add progress callback to the calculator
+            self.calculator.progress_updated = self.progress_updated
+            
+            completion_status = self.calculator.calculate_completion_status()
+            
+            self.progress_updated.emit(80, "Processing results...")
+            
+            # Apply date filtering if specified in options
+            if self.options.get('use_date_range', False):
+                try:
+                    start_date = pd.to_datetime(self.options.get('start_date'))
+                    end_date = pd.to_datetime(self.options.get('end_date'))
+                    
+                    # Filter by date range
+                    self.progress_updated.emit(85, f"Filtering data to date range {start_date.date()} to {end_date.date()}...")
+                    
+                    # Create a timestamp for filtering
+                    completion_status['date'] = pd.to_datetime(
+                        completion_status['year'].astype(str) + '-' + 
+                        completion_status['month'].astype(str) + '-01'
+                    )
+                    
+                    # Apply filter
+                    completion_status = completion_status[
+                        (completion_status['date'] >= start_date) & 
+                        (completion_status['date'] <= end_date)
+                    ]
+                    
+                    # Remove the temporary date column
+                    completion_status = completion_status.drop('date', axis=1)
+                except Exception as e:
+                    self.progress_updated.emit(85, f"Warning: Could not apply date filter: {str(e)}")
+            
+            # Generate summary metrics
+            record_count = len(completion_status) if completion_status is not None else 0
+            completion_count = completion_status['completion_name'].nunique() if not completion_status.empty else 0
+            
+            self.progress_updated.emit(90, f"Successfully processed {record_count} records for {completion_count} completions...")
+            
+            self.results = {
+                'completion_status': completion_status
+            }
         except Exception as e:
-            # Operation failed
-            import traceback
-            self.error = f"{str(e)}\n{traceback.format_exc()}"
-            self.progress_updated.emit(0, f"Error: {str(e)}")
-            self.operation_completed.emit(False, self.error)
-    
+            self.progress_updated.emit(20, f"Error calculating completion states: {str(e)}")
+            raise
+
     def calculate_well_monthly_types(self):
         """Calculate well types by month"""
         self.progress_updated.emit(20, "Calculating monthly well types...")
@@ -230,6 +289,12 @@ class WellProductionApp(QMainWindow):
         well_type_action.setStatusTip("Calculate well types (producer/injector) over time")
         well_type_action.triggered.connect(self.run_well_type_operation)
         operations_menu.addAction(well_type_action)
+        
+        # Add new action for completion state calculation
+        completion_state_action = QAction("Calculate &Completion States", self)
+        completion_state_action.setStatusTip("Calculate completion states by reservoir")
+        completion_state_action.triggered.connect(self.run_completion_state_operation)
+        operations_menu.addAction(completion_state_action)
         
         operations_menu.addSeparator()
         
@@ -901,7 +966,7 @@ class WellProductionApp(QMainWindow):
         """Save operation results to database, overwriting any previous operation of the same type"""
         try:
             # Create operation entry
-            description = "Operation to classify wells by type"
+            description = "Operation to classify wells by type and track completion status"
             parameters_json = json.dumps(options)
             
             # The create_operation method now deletes the previous operation if it exists
@@ -919,7 +984,7 @@ class WellProductionApp(QMainWindow):
                 )
                 return False
             
-            # Save data - now simplified to only deal with well_monthly_type
+            # Save monthly well type data
             if 'monthly_types' in results and not results['monthly_types'].empty:
                 success = self.operations_db.save_well_monthly_type(operation_id, results['monthly_types'])
                 if not success:
@@ -937,6 +1002,17 @@ class WellProductionApp(QMainWindow):
                 )
                 return False
             
+            # Save completion status data if available
+            if 'completion_status' in results and not results['completion_status'].empty:
+                success = self.operations_db.save_completion_status(operation_id, results['completion_status'])
+                if not success:
+                    QMessageBox.warning(
+                        self,
+                        "Database Warning",
+                        f"Error saving completion status results."
+                    )
+                    # Continue despite this error, since we already saved the monthly data
+            
             return True
                 
         except Exception as e:
@@ -946,7 +1022,57 @@ class WellProductionApp(QMainWindow):
                 f"An error occurred while saving the operation results: {str(e)}"
             )
             return False
-
+    
+    def run_completion_state_operation(self):
+        """Run the completion state calculation operation"""
+        dialog = CompletionStateOperationDialog(self)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+        
+        # Get options from dialog
+        options = dialog.get_options()
+        
+        # Use a specific operation type for completion state
+        operation_type = "completion_state"
+        
+        # Check if operation already exists
+        if self.operations_db.operation_exists(operation_type):
+            result = QMessageBox.question(
+                self,
+                "Operation Exists",
+                f"A previous '{operation_type}' operation already exists. "
+                f"Would you like to run it again?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            if result != QMessageBox.Yes:
+                return
+        
+        # Create progress dialog
+        progress_dialog = OperationProgressDialog(
+            self,
+            title="Calculating Completion States",
+            description="Calculating the state of each well completion by reservoir"
+        )
+        
+        # Create worker thread
+        worker = OperationWorker(operation_type, self.data_store, options)
+        
+        # Connect signals
+        worker.progress_updated.connect(progress_dialog.update_progress)
+        worker.operation_completed.connect(lambda success, result: self.on_operation_completed(
+            success, result, operation_type, progress_dialog, options
+        ))
+        
+        # Start worker and show dialog
+        worker.start()
+        progress_dialog.exec_()
+        
+        # If dialog was rejected (Cancel button), terminate worker
+        if not progress_dialog.result():
+            worker.terminate()
+            worker.wait()
+    
     def view_operations(self):
         """View and manage previous operations"""
         # Get list of operations
@@ -976,9 +1102,41 @@ class WellProductionApp(QMainWindow):
         operation_id = operation['operation_id']
         operation_name = operation['operation_name']
         
-        # Get data - simplified to just retrieve monthly type data
-        monthly_df = self.operations_db.get_well_monthly_type(operation_id)
-        self.show_monthly_type_results(monthly_df, operation)
+        if operation_name == "well_monthly_type":
+            # Get monthly well type data
+            monthly_df = self.operations_db.get_well_monthly_type(operation_id)
+            self.show_monthly_type_results(monthly_df, operation)
+        elif operation_name == "completion_state":
+            # Get completion state data
+            completion_df = self.operations_db.get_completion_status(operation_id)
+            self.show_completion_state_results(completion_df, operation)
+        else:
+            QMessageBox.warning(
+                self,
+                "Unknown Operation Type",
+                f"The operation type '{operation_name}' is not recognized."
+            )
+
+    def show_completion_state_results(self, completion_df, operation):
+        """Show results of completion state operation"""
+        if completion_df.empty:
+            QMessageBox.warning(
+                self,
+                "No Data",
+                "No completion state data found for this operation."
+            )
+            return
+        
+        # Create results dialog
+        dialog = CompletionStateResultsDialog(
+            self,
+            title=f"Completion State Results - {operation['creation_date']}",
+            description="Well completion states by reservoir",
+            data=completion_df
+        )
+        
+        # Show dialog
+        dialog.exec_()
 
     def show_monthly_type_results(self, monthly_df, operation):
         """Show results of monthly well type operation"""

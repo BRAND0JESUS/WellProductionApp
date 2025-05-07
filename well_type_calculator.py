@@ -24,6 +24,8 @@ class WellTypeCalculator:
         self.data_store = data_store
         # Pre-compute mappings once to avoid repeated lookups
         self._completion_to_well = self._build_completion_to_well_map()
+        # Add progress update callback (will be set by OperationWorker)
+        self.progress_updated = lambda percent, message: None  # Default no-op function
         
     def _build_completion_to_well_map(self):
         """Build completion to well mapping once for reuse"""
@@ -490,3 +492,279 @@ class WellTypeCalculator:
         
         # Sort the final result
         return result.sort_values(['well_name', 'year', 'month']).reset_index(drop=True)
+    
+    def calculate_completion_status(self):
+        """
+        Calculate status of each completion by reservoir for all wells
+        
+        Returns: DataFrame with columns well_name, completion_name, reservoir, year, month,
+                is_active, well_type, oil_rate, water_rate, water_inj_rate
+        """
+        self.progress_updated.emit(25, "Processing production data...")
+        
+        # Process production data at completion level (with progress updates)
+        prod_completion_data = self._process_completion_production_data()
+        
+        self.progress_updated.emit(50, "Processing injection data...")
+        
+        # Process injection data at completion level (with progress updates)
+        inj_completion_data = self._process_completion_injection_data()
+        
+        self.progress_updated.emit(75, "Combining data and determining completion status...")
+        
+        # Combine data for each completion
+        return self._combine_completion_data(prod_completion_data, inj_completion_data)
+
+    def _process_completion_production_data(self):
+        """Process production data at completion level with optimized performance"""
+        # Get production data
+        prod_data = self.data_store.production_data.data
+        
+        if prod_data is None or prod_data.empty:
+            return pd.DataFrame(columns=['completion_name', 'well_name', 'reservoir', 'year', 'month', 'oil_rate', 'water_rate'])
+        
+        # Make a copy to avoid modifying the original
+        prod_data = prod_data.copy()
+        
+        # For performance, only process the minimum required columns
+        keep_cols = ['COMP_S_NAME', 'PROD_DT', 'VO_OIL_PROD', 'VO_WAT_PROD']
+        prod_data = prod_data[keep_cols]
+        
+        # Add well_name column based on completion name
+        # Use a more efficient vectorized mapping
+        completion_to_well = {}
+        for well_name, completions in self.data_store.well_to_completions.items():
+            for completion in completions:
+                completion_to_well[completion] = well_name
+                
+        prod_data['well_name'] = prod_data['COMP_S_NAME'].map(completion_to_well)
+        
+        # Drop rows with unknown completions immediately to reduce data size
+        prod_data = prod_data.dropna(subset=['well_name'])
+        
+        if prod_data.empty:
+            return pd.DataFrame(columns=['completion_name', 'well_name', 'reservoir', 'year', 'month', 'oil_rate', 'water_rate'])
+        
+        # Add reservoir column based on completion name
+        completion_to_reservoir = self.data_store.completion_to_reservoir
+        prod_data['reservoir'] = prod_data['COMP_S_NAME'].map(
+            lambda comp: completion_to_reservoir.get(comp, 'UNKNOWN')
+        )
+        
+        # Extract year and month more efficiently
+        prod_data['year'] = prod_data['PROD_DT'].dt.year
+        prod_data['month'] = prod_data['PROD_DT'].dt.month
+        
+        # Calculate daily rates
+        prod_data['days_in_month'] = prod_data['PROD_DT'].dt.daysinmonth
+        prod_data['oil_rate'] = prod_data['VO_OIL_PROD'] / prod_data['days_in_month']
+        prod_data['water_rate'] = prod_data['VO_WAT_PROD'] / prod_data['days_in_month']
+        
+        # Rename completion column for consistency
+        prod_data.rename(columns={'COMP_S_NAME': 'completion_name'}, inplace=True)
+        
+        # Process in chunks for better memory management
+        chunk_size = 10000
+        chunks = [prod_data[i:i+chunk_size] for i in range(0, len(prod_data), chunk_size)]
+        
+        result_chunks = []
+        for chunk in chunks:
+            # Group by completion, well, reservoir, year, month and sum rates
+            grouped = chunk.groupby(['completion_name', 'well_name', 'reservoir', 'year', 'month']).agg({
+                'oil_rate': 'sum',
+                'water_rate': 'sum'
+            }).reset_index()
+            
+            result_chunks.append(grouped)
+        
+        # Combine the processed chunks
+        if result_chunks:
+            return pd.concat(result_chunks, ignore_index=True)
+        else:
+            return pd.DataFrame(columns=['completion_name', 'well_name', 'reservoir', 'year', 'month', 'oil_rate', 'water_rate'])
+
+    def _process_completion_injection_data(self):
+        """Process injection data at completion level with optimized performance"""
+        # Get injection data
+        inj_data = self.data_store.injection_data.data
+        
+        if inj_data is None or inj_data.empty:
+            return pd.DataFrame(columns=['completion_name', 'well_name', 'reservoir', 'year', 'month', 'water_inj_rate'])
+        
+        # Make a copy to avoid modifying the original
+        inj_data = inj_data.copy()
+        
+        # For performance, only process the minimum required columns
+        keep_cols = ['COMPLETION_LEGAL_NAME', 'Date', 'Water_INJ_CALDAY']
+        inj_data = inj_data[keep_cols]
+        
+        # Add well_name column based on completion name
+        # Use a more efficient vectorized mapping
+        completion_to_well = {}
+        for well_name, completions in self.data_store.well_to_completions.items():
+            for completion in completions:
+                completion_to_well[completion] = well_name
+                
+        inj_data['well_name'] = inj_data['COMPLETION_LEGAL_NAME'].map(completion_to_well)
+        
+        # Drop rows with unknown completions immediately to reduce data size
+        inj_data = inj_data.dropna(subset=['well_name'])
+        
+        if inj_data.empty:
+            return pd.DataFrame(columns=['completion_name', 'well_name', 'reservoir', 'year', 'month', 'water_inj_rate'])
+        
+        # Add reservoir column based on completion name
+        completion_to_reservoir = self.data_store.completion_to_reservoir
+        inj_data['reservoir'] = inj_data['COMPLETION_LEGAL_NAME'].map(
+            lambda comp: completion_to_reservoir.get(comp, 'UNKNOWN')
+        )
+        
+        # Extract year and month more efficiently
+        inj_data['year'] = inj_data['Date'].dt.year
+        inj_data['month'] = inj_data['Date'].dt.month
+        
+        # Calculate daily rates
+        inj_data['days_in_month'] = inj_data['Date'].dt.daysinmonth
+        inj_data['water_inj_rate'] = inj_data['Water_INJ_CALDAY'] / inj_data['days_in_month']
+        
+        # Rename completion column for consistency
+        inj_data.rename(columns={'COMPLETION_LEGAL_NAME': 'completion_name'}, inplace=True)
+        
+        # Process in chunks for better memory management
+        chunk_size = 10000
+        chunks = [inj_data[i:i+chunk_size] for i in range(0, len(inj_data), chunk_size)]
+        
+        result_chunks = []
+        for chunk in chunks:
+            # Group by completion, well, reservoir, year, month and sum rates
+            grouped = chunk.groupby(['completion_name', 'well_name', 'reservoir', 'year', 'month']).agg({
+                'water_inj_rate': 'sum'
+            }).reset_index()
+            
+            result_chunks.append(grouped)
+        
+        # Combine the processed chunks
+        if result_chunks:
+            return pd.concat(result_chunks, ignore_index=True)
+        else:
+            return pd.DataFrame(columns=['completion_name', 'well_name', 'reservoir', 'year', 'month', 'water_inj_rate'])
+
+    def _combine_completion_data(self, prod_monthly, inj_monthly):
+        """
+        Combine production and injection data at the completion level
+        and determine active status and well type for each completion
+        """
+        # If both dataframes are empty, return empty result
+        if (prod_monthly is None or prod_monthly.empty) and (inj_monthly is None or inj_monthly.empty):
+            return pd.DataFrame(columns=[
+                'well_name', 'completion_name', 'reservoir', 'year', 'month',
+                'is_active', 'well_type', 'oil_rate', 'water_rate', 'water_inj_rate'
+            ])
+            
+        # If one is empty but not the other
+        if prod_monthly is None or prod_monthly.empty:
+            result = inj_monthly.copy()
+            result['oil_rate'] = 0.0
+            result['water_rate'] = 0.0
+            result['well_type'] = 'INJECTION'
+            result['is_active'] = result['water_inj_rate'] > 0
+            result['is_active'] = result['is_active'].astype(int)
+            return result.sort_values(['well_name', 'completion_name', 'year', 'month']).reset_index(drop=True)
+            
+        if inj_monthly is None or inj_monthly.empty:
+            result = prod_monthly.copy()
+            result['water_inj_rate'] = 0.0
+            result['well_type'] = 'PRODUCTION'
+            result['is_active'] = (result['oil_rate'] > 0) | (result['water_rate'] > 0)
+            result['is_active'] = result['is_active'].astype(int)
+            return result.sort_values(['well_name', 'completion_name', 'year', 'month']).reset_index(drop=True)
+        
+        # Performance optimization - use efficient merge with suffixes
+        try:
+            # Merge in chunks to avoid memory issues
+            chunk_size = 10000
+            prod_chunks = [prod_monthly[i:i+chunk_size] for i in range(0, len(prod_monthly), chunk_size)]
+            
+            merged_chunks = []
+            for prod_chunk in prod_chunks:
+                # Merge production and injection data on completion_name, well_name, reservoir, year, month
+                chunk_merged = pd.merge(
+                    prod_chunk, 
+                    inj_monthly, 
+                    on=['completion_name', 'well_name', 'reservoir', 'year', 'month'], 
+                    how='outer',
+                    suffixes=('', '_inj')
+                )
+                merged_chunks.append(chunk_merged)
+            
+            if merged_chunks:
+                merged = pd.concat(merged_chunks, ignore_index=True)
+            else:
+                # Fallback if chunking failed
+                merged = pd.merge(
+                    prod_monthly, 
+                    inj_monthly, 
+                    on=['completion_name', 'well_name', 'reservoir', 'year', 'month'], 
+                    how='outer'
+                )
+        except Exception as e:
+            print(f"Error during merge: {e}")
+            # Try a different merge approach if the first one fails
+            merged = pd.merge(
+                prod_monthly, 
+                inj_monthly, 
+                on=['completion_name', 'well_name', 'reservoir', 'year', 'month'], 
+                how='outer'
+            )
+        
+        # Fill NaN values with 0
+        fill_cols = {'oil_rate': 0.0, 'water_rate': 0.0, 'water_inj_rate': 0.0}
+        merged = merged.fillna(fill_cols)
+        
+        # Determine well type and active status
+        # Calculate has_prod and has_inj as boolean masks
+        has_prod = (merged['oil_rate'] > 0) | (merged['water_rate'] > 0)
+        has_inj = merged['water_inj_rate'] > 0
+        
+        # Set well_type based on production and injection
+        merged['well_type'] = 'UNKNOWN'
+        merged.loc[has_prod & ~has_inj, 'well_type'] = 'PRODUCTION'
+        merged.loc[~has_prod & has_inj, 'well_type'] = 'INJECTION'
+        merged.loc[has_prod & has_inj, 'well_type'] = 'DUAL'
+        
+        # Reclassify DUAL as either PRODUCTION or INJECTION based on dominant rate
+        dual_mask = merged['well_type'] == 'DUAL'
+        if dual_mask.any():
+            # Process dual wells in chunks to avoid performance issues
+            dual_wells = merged[dual_mask].copy()
+            
+            dual_chunks = [dual_wells[i:i+1000] for i in range(0, len(dual_wells), 1000)]
+            for i, chunk in enumerate(dual_chunks):
+                chunk_mask = chunk.index
+                merged.loc[chunk_mask, 'well_type'] = chunk.apply(
+                    lambda row: 'PRODUCTION' if (row['oil_rate'] + row['water_rate'] >= row['water_inj_rate']) 
+                            else 'INJECTION', 
+                    axis=1
+                )
+        
+        # Set is_active based on whether there's any production or injection
+        merged['is_active'] = (has_prod | has_inj).astype(int)
+        
+        # Sort results
+        # Use sorted chunks to avoid memory issues with very large dataframes
+        try:
+            chunk_size = 10000
+            result_chunks = [merged[i:i+chunk_size] for i in range(0, len(merged), chunk_size)]
+            
+            sorted_chunks = []
+            for chunk in result_chunks:
+                sorted_chunk = chunk.sort_values(['well_name', 'completion_name', 'year', 'month'])
+                sorted_chunks.append(sorted_chunk)
+            
+            result = pd.concat(sorted_chunks, ignore_index=True)
+        except Exception as e:
+            print(f"Error during sorting: {e}")
+            # Fallback if chunking fails
+            result = merged
+        
+        return result

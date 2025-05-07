@@ -269,3 +269,216 @@ class OperationListDialog(QDialog):
                 self.accept()
                 # Return code 2 means delete operation
                 self.done(2)
+                
+                
+class CompletionStateOperationDialog(QDialog):
+    """Dialog to set up completion state calculation operation"""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        
+        self.setWindowTitle("Completion State Calculation")
+        self.setMinimumWidth(450)
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
+        
+        # Main layout
+        layout = QVBoxLayout(self)
+        
+        # Description
+        description = (
+            "This operation will calculate the state (active/inactive) of each well completion "
+            "by reservoir based on production and injection data. The results will be "
+            "stored in the operations database."
+        )
+        desc_label = QLabel(description)
+        desc_label.setWordWrap(True)
+        layout.addWidget(desc_label)
+        
+        # Options group
+        options_group = QGroupBox("Options")
+        options_layout = QVBoxLayout()
+        
+        # Date range option
+        self.use_date_range_checkbox = QCheckBox("Use specific date range")
+        options_layout.addWidget(self.use_date_range_checkbox)
+        
+        # Date range inputs
+        date_range_layout = QHBoxLayout()
+        
+        date_range_layout.addWidget(QLabel("Start Date:"))
+        self.start_date_edit = QDateEdit(QDate(2024, 1, 1))
+        self.start_date_edit.setCalendarPopup(True)
+        self.start_date_edit.setEnabled(False)  # Initially disabled
+        date_range_layout.addWidget(self.start_date_edit)
+        
+        date_range_layout.addWidget(QLabel("End Date:"))
+        self.end_date_edit = QDateEdit(QDate(2024, 12, 31))
+        self.end_date_edit.setCalendarPopup(True)
+        self.end_date_edit.setEnabled(False)  # Initially disabled
+        date_range_layout.addWidget(self.end_date_edit)
+        
+        options_layout.addLayout(date_range_layout)
+        
+        # Connect the checkbox to enable/disable date inputs
+        self.use_date_range_checkbox.stateChanged.connect(self.toggle_date_inputs)
+        
+        # Note about results detail
+        note_label = QLabel("The operation will calculate the status of each completion "
+                         "for each reservoir, showing whether it is active or inactive.")
+        note_label.setStyleSheet("font-style: italic; color: #555;")
+        note_label.setWordWrap(True)
+        options_layout.addWidget(note_label)
+        
+        # Note about overwriting previous results
+        overwrite_note = QLabel("The results will overwrite any previous operation of the same type.")
+        overwrite_note.setStyleSheet("font-weight: bold; color: #c00;")
+        overwrite_note.setWordWrap(True)
+        options_layout.addWidget(overwrite_note)
+        
+        options_group.setLayout(options_layout)
+        layout.addWidget(options_group)
+        
+        # Buttons
+        self.button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        self.button_box.accepted.connect(self.accept)
+        self.button_box.rejected.connect(self.reject)
+        layout.addWidget(self.button_box)
+        
+        self.setLayout(layout)
+    
+    def toggle_date_inputs(self, state):
+        """Enable or disable date inputs based on checkbox state"""
+        self.start_date_edit.setEnabled(state == Qt.Checked)
+        self.end_date_edit.setEnabled(state == Qt.Checked)
+    
+    def get_options(self):
+        """Return the selected options as a dictionary"""
+        options = {
+            'use_date_range': self.use_date_range_checkbox.isChecked()
+        }
+        
+        if options['use_date_range']:
+            options['start_date'] = self.start_date_edit.date().toString('yyyy-MM-dd')
+            options['end_date'] = self.end_date_edit.date().toString('yyyy-MM-dd')
+        
+        return options
+    
+    
+class CompletionStateResultsDialog(QDialog):
+    """Dialog to display results of completion state operation"""
+    
+    def __init__(self, parent=None, title="Completion State Results", description="", data=None):
+        super().__init__(parent)
+        
+        self.setWindowTitle(title)
+        self.setMinimumSize(800, 600)
+        
+        # Main layout
+        layout = QVBoxLayout(self)
+        
+        # Description label
+        self.description_label = QLabel(description)
+        self.description_label.setWordWrap(True)
+        layout.addWidget(self.description_label)
+        
+        # Results container
+        results_group = QGroupBox("Results Summary")
+        results_layout = QVBoxLayout()
+        
+        # Process data for display
+        if data is not None and not data.empty:
+            # Calculate statistics
+            total_completions = data['completion_name'].nunique()
+            total_wells = data['well_name'].nunique()
+            total_reservoirs = data['reservoir'].nunique()
+            
+            # Count active completions
+            active_completions = data[data['is_active'] == True]['completion_name'].nunique()
+            inactive_completions = total_completions - active_completions
+            
+            # Create summary labels
+            stats_text = f"Total wells: {total_wells}\n"
+            stats_text += f"Total completions: {total_completions}\n"
+            stats_text += f"Total reservoirs: {total_reservoirs}\n"
+            stats_text += f"Active completions: {active_completions}\n"
+            stats_text += f"Inactive completions: {inactive_completions}\n"
+            
+            stats_label = QLabel(stats_text)
+            stats_label.setStyleSheet("font-family: monospace;")
+            results_layout.addWidget(stats_label)
+            
+            # Add more detailed information
+            # Group data by reservoir
+            reservoirs = data['reservoir'].unique()
+            
+            if len(reservoirs) > 0:
+                reservoir_info = "Reservoir statistics:\n"
+                
+                for reservoir in reservoirs:
+                    reservoir_data = data[data['reservoir'] == reservoir]
+                    total_comp_in_reservoir = reservoir_data['completion_name'].nunique()
+                    active_comp_in_reservoir = reservoir_data[reservoir_data['is_active'] == True]['completion_name'].nunique()
+                    
+                    reservoir_info += f"  {reservoir}: {active_comp_in_reservoir} active out of {total_comp_in_reservoir} completions\n"
+                
+                reservoir_label = QLabel(reservoir_info)
+                reservoir_label.setStyleSheet("font-family: monospace;")
+                results_layout.addWidget(reservoir_label)
+        
+        results_group.setLayout(results_layout)
+        layout.addWidget(results_group)
+        
+        # Add a detailed view of the data
+        detail_group = QGroupBox("Detailed Results")
+        detail_layout = QVBoxLayout()
+        
+        # Create table widget for showing 100 sample records
+        from PyQt5.QtWidgets import QTableWidget, QTableWidgetItem, QHeaderView
+        
+        # Create the table
+        self.results_table = QTableWidget()
+        
+        if data is not None and not data.empty:
+            # Set up table
+            sample_data = data.head(100)  # Show first 100 rows for performance
+            
+            # Set column count and headers
+            display_columns = ['well_name', 'completion_name', 'reservoir', 'year', 
+                             'month', 'is_active', 'well_type']
+            
+            self.results_table.setColumnCount(len(display_columns))
+            self.results_table.setHorizontalHeaderLabels(display_columns)
+            
+            # Set row count
+            self.results_table.setRowCount(len(sample_data))
+            
+            # Populate data
+            for row_idx, (_, row_data) in enumerate(sample_data.iterrows()):
+                for col_idx, col_name in enumerate(display_columns):
+                    value = row_data[col_name]
+                    # Format boolean values
+                    if col_name == 'is_active':
+                        value = "Active" if value else "Inactive"
+                    
+                    item = QTableWidgetItem(str(value))
+                    self.results_table.setItem(row_idx, col_idx, item)
+            
+            # Resize columns to content
+            self.results_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        
+        detail_layout.addWidget(self.results_table)
+        
+        if data is not None and len(data) > 100:
+            note_label = QLabel(f"Showing 100 of {len(data)} records")
+            note_label.setStyleSheet("font-style: italic;")
+            detail_layout.addWidget(note_label)
+        
+        detail_group.setLayout(detail_layout)
+        layout.addWidget(detail_group)
+        
+        # Buttons
+        self.button_box = QDialogButtonBox(QDialogButtonBox.Ok)
+        self.button_box.accepted.connect(self.accept)
+        layout.addWidget(self.button_box)
+        
+        self.setLayout(layout)
